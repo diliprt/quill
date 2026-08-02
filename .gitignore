@@ -1,0 +1,15 @@
+# Build output
+build/
+
+# Local signing identity — PRIVATE KEYS, never publish.
+# Each user generates their own with ./signing/install-identity.sh
+*.pem
+*.p12
+signing/key.pem
+signing/cert.pem
+signing/quill.p12
+
+.DS_Store
+
+# Release artifacts
+dist/

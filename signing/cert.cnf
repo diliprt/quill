@@ -1,0 +1,10 @@
+[ req ]
+distinguished_name = dn
+x509_extensions = v3
+prompt = no
+[ dn ]
+CN = Quill Local Signing
+[ v3 ]
+basicConstraints = critical,CA:false
+keyUsage = critical,digitalSignature
+extendedKeyUsage = critical,codeSigning

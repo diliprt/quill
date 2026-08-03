@@ -21,6 +21,36 @@ enum VoiceCommands {
         return openGrok.firstMatch(in: text, range: range) != nil
     }
 
+    /// "that's it" — but only as the very last thing said.
+    ///
+    /// Anchored to the end on purpose. The phrase is ordinary English in the middle
+    /// of a sentence ("that's it exactly"), and stopping there would cut someone off
+    /// mid-thought. Matching only a trailing occurrence, and only after a short
+    /// silence, is what makes it safe to have on by default.
+    private static let stopPhrase: NSRegularExpression = {
+        let pattern = "(?:^|\\s)(?:and\\s+)?that(?:'|’)?s\\s+(?:it|all)\\b[\\s,.!?]*$"
+        return try! NSRegularExpression(pattern: pattern, options: [.caseInsensitive])
+    }()
+
+    static func endsWithStopPhrase(_ text: String) -> Bool {
+        let range = NSRange(text.startIndex..., in: text)
+        return stopPhrase.firstMatch(in: text, range: range) != nil
+    }
+
+    /// Removes a trailing "that's it" so the words that ended the dictation are not
+    /// part of what gets pasted.
+    static func stripStopPhrase(_ text: String) -> String {
+        let range = NSRange(text.startIndex..., in: text)
+        let stripped = stopPhrase.stringByReplacingMatches(
+            in: text, options: [], range: range, withTemplate: "")
+        return stripped.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Everything a spoken command should never leave behind.
+    static func stripAll(_ text: String) -> String {
+        stripStopPhrase(strip(text))
+    }
+
     /// The transcript with any command phrase taken out.
     static func strip(_ text: String) -> String {
         let range = NSRange(text.startIndex..., in: text)

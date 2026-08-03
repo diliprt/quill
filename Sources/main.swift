@@ -19,6 +19,7 @@ enum Defaults {
     static let trigger = "trigger"
     static let singleTap = "singleTap"
     static let didShowSetup = "didShowSetup"
+    static let stopPhrase = "stopPhrase"
 
     static func register() {
         UserDefaults.standard.register(defaults: [
@@ -28,6 +29,7 @@ enum Defaults {
             clickToInsert: true,
             trigger: Trigger.control.rawValue,
             singleTap: true,
+            stopPhrase: true,
         ])
     }
 
@@ -44,8 +46,9 @@ enum Defaults {
 final class QuillApp: NSObject, NSApplicationDelegate {
 
     private enum StopReason {
-        case hotkey     // ⌘⌘ or the pill — focus has not moved
+        case hotkey     // trigger key or the pill — focus has not moved
         case click      // you clicked into the target — give focus a beat to settle
+        case voice      // you said "that's it" — focus has not moved either
     }
 
     private let hotkey = DoubleTapRightCommand()
@@ -61,6 +64,8 @@ final class QuillApp: NSObject, NSApplicationDelegate {
     private var stopReason: StopReason = .hotkey
     private var didRunVoiceCommand = false
     private var finaliseStartedAt: Date?
+    private var pendingVoiceStop: DispatchWorkItem?
+    private var lastStopCandidate: String?
     private var startedAt: Date?
 
     private var silenceTimer: Timer?
@@ -103,6 +108,7 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         applyTapMode()
         hotkey.onTrigger = { [weak self] in self?.toggle() }
         hotkey.onClickAnywhere = { [weak self] point in self?.handleClickAnywhere(at: point) }
+        hotkey.onCancel = { [weak self] in self?.cancelSession() }
 
         isTrusted = Inserter.isTrusted
         let inputMonitoring = IOHIDCheckAccess(kIOHIDRequestTypeListenEvent)
@@ -263,6 +269,8 @@ final class QuillApp: NSObject, NSApplicationDelegate {
                   action: #selector(toggleClickToInsert))
         addToggle(to: menu, title: "Insert at end of field", key: Defaults.insertAtEnd,
                   action: #selector(toggleInsertAtEnd))
+        addToggle(to: menu, title: "Stop when I say \u{201C}that\u{2019}s it\u{201D}", key: Defaults.stopPhrase,
+                  action: #selector(toggleStopPhrase))
 
         let appearanceMenu = NSMenu()
         appearanceMenu.autoenablesItems = false
@@ -345,6 +353,7 @@ final class QuillApp: NSObject, NSApplicationDelegate {
     // MARK: Menu actions
 
     @objc private func toggleInsertAtEnd()   { Defaults.flip(Defaults.insertAtEnd) }
+    @objc private func toggleStopPhrase()    { Defaults.flip(Defaults.stopPhrase) }
     @objc private func toggleClickToInsert() { Defaults.flip(Defaults.clickToInsert) }
     @objc private func toggleLoginItem()     { LoginItem.setEnabled(!LoginItem.isEnabled) }
 
@@ -465,6 +474,7 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         sawAnyText = false
         stopReason = .hotkey
         didRunVoiceCommand = false
+        lastStopCandidate = nil
 
         client.onReady = { [weak self] in
             guard let self else { return }
@@ -481,8 +491,10 @@ final class QuillApp: NSObject, NSApplicationDelegate {
                 self.runOpenGrok()
             }
 
-            // Show what will actually be inserted, command phrase already removed.
-            self.hud.update(text: VoiceCommands.strip(text))
+            self.considerVoiceStop(after: text)
+
+            // Show what will actually be inserted, command phrases already removed.
+            self.hud.update(text: VoiceCommands.stripAll(text))
         }
         client.onComplete = { [weak self] text in self?.finishSession(with: text) }
         client.onFailure = { [weak self] failure in self?.abortSession(message: failure.message) }
@@ -525,6 +537,7 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         let front = Inserter.frontmostApp()
         hud.update(target: front.name, icon: front.icon)
         hotkey.watchClicks = Defaults.bool(Defaults.clickToInsert)
+        hotkey.watchForCancel(true)
         Log.write("recording started — watchClicks=\(hotkey.watchClicks)")
 
         tickTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
@@ -609,11 +622,69 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// Stop when "that's it" is the last thing said — but only after a beat of
+    /// silence, so a mid-sentence "that's it exactly" cannot cut someone off. Any
+    /// further speech cancels the pending stop.
+    private func considerVoiceStop(after text: String) {
+        if ProcessInfo.processInfo.environment["QUILL_TRACE_STOP"] != nil {
+            Log.write("  tail? \"…\(String(text.suffix(20)))\" ends=\(VoiceCommands.endsWithStopPhrase(text)) "
+                + "pending=\(pendingVoiceStop != nil)")
+        }
+
+        guard Defaults.bool(Defaults.stopPhrase), isRecording,
+              VoiceCommands.endsWithStopPhrase(text)
+        else {
+            // Speech continued past the phrase, or the feature is off — stand down.
+            pendingVoiceStop?.cancel()
+            pendingVoiceStop = nil
+            lastStopCandidate = nil
+            return
+        }
+
+        // Only a CHANGE in what was said restarts the countdown. The server
+        // re-sends an unchanged partial every couple of hundred milliseconds while
+        // it works through the audio, and treating those as new speech pushed the
+        // deadline back forever, so the stop never fired at all.
+        if text == lastStopCandidate, pendingVoiceStop != nil { return }
+        lastStopCandidate = text
+
+        pendingVoiceStop?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, self.isRecording else { return }
+            Log.write("voice stop: heard the finish phrase")
+            self.hud.flashTarget("finishing…", for: 2)
+            self.stopSession(reason: .voice)
+        }
+        pendingVoiceStop = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.7, execute: work)
+    }
+
+    /// Escape during a recording — throw it away, insert nothing.
+    private func cancelSession() {
+        guard isRecording else { return }
+        Log.write("cancelled by Escape")
+        isRecording = false
+        pendingVoiceStop?.cancel()
+        pendingVoiceStop = nil
+        hotkey.watchClicks = false
+        hotkey.watchForCancel(false)
+        invalidateTimers()
+        recorder.stop()
+        stt?.cancel()
+        stt = nil
+        refreshIcon()
+        hud.apply(.notice("Cancelled"))
+        hud.collapse(after: 0.9)
+    }
+
     private func stopSession(reason: StopReason) {
         guard isRecording else { return }
         isRecording = false
         stopReason = reason
+        pendingVoiceStop?.cancel()
+        pendingVoiceStop = nil
         hotkey.watchClicks = false
+        hotkey.watchForCancel(false)
         invalidateTimers()
         recorder.stop()
         refreshIcon()
@@ -621,7 +692,7 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         // Never discard the session just because no partial has arrived yet — on
         // the first recording the socket is often still connecting. Let it finish
         // and decide on the actual transcript instead.
-        Log.write("stop (\(reason == .click ? "click" : "hotkey/pill")) — finalising, sawText=\(sawAnyText)")
+        Log.write("stop (\(reason == .click ? "click" : (reason == .voice ? "voice" : "hotkey/pill"))) — finalising, sawText=\(sawAnyText)")
         finaliseStartedAt = Date()
         logAudioState()
         hud.apply(.thinking)
@@ -631,7 +702,7 @@ final class QuillApp: NSObject, NSApplicationDelegate {
     private func finishSession(with text: String) {
         stt = nil
         // The command phrase must never reach the target app.
-        let trimmed = VoiceCommands.strip(text).trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmed = VoiceCommands.stripAll(text).trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             if didRunVoiceCommand {
                 hud.apply(.notice("Opened Grok Build"))
@@ -706,7 +777,10 @@ final class QuillApp: NSObject, NSApplicationDelegate {
     private func abortSession(message: String) {
         Log.write("aborted — \(message)")
         isRecording = false
+        pendingVoiceStop?.cancel()
+        pendingVoiceStop = nil
         hotkey.watchClicks = false
+        hotkey.watchForCancel(false)
         invalidateTimers()
         recorder.stop()
         stt?.cancel()

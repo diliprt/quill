@@ -116,6 +116,38 @@ final class DoubleTapRightCommand {
     var onClickAnywhere: (CGPoint) -> Void = { _ in }
     var watchClicks = false
 
+    /// Escape pressed during a recording — the user wants this thrown away.
+    var onCancel: () -> Void = {}
+
+    private static let escapeKeyCode: Int64 = 53
+    private var cancelTimer: Timer?
+    private var escapeWasDown = false
+
+    /// Escape is watched two ways, because either can be unavailable.
+    ///
+    /// The event tap only receives key presses when Input Monitoring has been
+    /// granted, which Quill deliberately does not require. `CGEventSource.keyState`
+    /// asks the hardware whether a key is down and is not gated behind that
+    /// permission, so polling it covers the common case. Whichever notices first
+    /// wins; a flag stops the cancel firing twice.
+    func watchForCancel(_ on: Bool) {
+        cancelTimer?.invalidate()
+        cancelTimer = nil
+        escapeWasDown = false
+        guard on else { return }
+
+        cancelTimer = Timer.scheduledTimer(withTimeInterval: 0.04, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            let down = CGEventSource.keyState(.combinedSessionState, key: CGKeyCode(Self.escapeKeyCode))
+            if down, !self.escapeWasDown {
+                self.escapeWasDown = true
+                DispatchQueue.main.async { self.onCancel() }
+            } else if !down {
+                self.escapeWasDown = false
+            }
+        }
+    }
+
     @discardableResult
     func start() -> Bool {
         guard tap == nil else { return true }
@@ -179,6 +211,14 @@ final class DoubleTapRightCommand {
 
         if type == .keyDown {
             let code = event.getIntegerValueField(.keyboardEventKeycode)
+
+            // Only meaningful when Input Monitoring happens to be granted; the
+            // keyState poll above covers everyone else.
+            if code == Self.escapeKeyCode, cancelTimer != nil, !escapeWasDown {
+                escapeWasDown = true
+                DispatchQueue.main.async { [weak self] in self?.onCancel() }
+                return false
+            }
             let bareKey = event.flags
                 .intersection([.maskCommand, .maskControl, .maskAlternate, .maskShift])
                 .isEmpty

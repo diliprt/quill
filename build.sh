@@ -65,6 +65,11 @@ SIGN_KEYCHAIN="$HOME/Library/Keychains/quill-signing.keychain-db"
 if [ -f "$SIGN_KEYCHAIN" ]; then
   echo "→ signing as '$SIGN_ID' (stable identity, no password prompt)"
   security unlock-keychain -p quill "$SIGN_KEYCHAIN" 2>/dev/null || true
+  # Re-assert codesign's access every build. If this lapses — or a stray copy of
+  # the identity ends up in the login keychain — macOS blocks the build on a
+  # password dialog instead of failing, and the build appears to hang forever.
+  security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k quill \
+    "$SIGN_KEYCHAIN" >/dev/null 2>&1 || true
   codesign --force --keychain "$SIGN_KEYCHAIN" --sign "$SIGN_ID" \
            --identifier "$BUNDLE_ID" "$APP" >/dev/null
 else

@@ -20,14 +20,25 @@ final class HUD {
     private let content = HUDView()
     private var collapseWork: DispatchWorkItem?
     private var state: State = .idle
+    private var targetOverrideUntil: Date?
 
-    private let compactSize = NSSize(width: 48, height: 30)
+    private let compactSize = NSSize(width: 34, height: 22)
     private let expandedSize = NSSize(width: 430, height: 70)
     private let margin: CGFloat = 18
 
     private static let anchorKey = "hudAnchor"
 
     var onClick: () -> Void = {}
+
+    /// When off, the pill is gone entirely while idle — the session bar still
+    /// appears for the duration of a dictation, and the menu-bar item and trigger
+    /// key are untouched.
+    var showsIdlePill = true {
+        didSet {
+            guard oldValue != showsIdlePill else { return }
+            if case .idle = state { apply(.idle, animated: false) }
+        }
+    }
 
     func install() {
         let panel = ensurePanel()
@@ -38,12 +49,7 @@ final class HUD {
     }
 
     func setCornerButton(visible: Bool) {
-        guard let panel else { return }
-        if visible {
-            panel.orderFrontRegardless()
-        } else if case .idle = state {
-            panel.orderOut(nil)
-        }
+        showsIdlePill = visible
     }
 
     func apply(_ newState: State, animated: Bool = true) {
@@ -62,8 +68,15 @@ final class HUD {
         // right on top of most apps' input boxes.
         panel.ignoresMouseEvents = !compact
 
-        panel.orderFrontRegardless()
+        // Position it either way, so it is already in the right place the moment a
+        // session starts — but stay hidden if the idle pill is switched off.
         let target = frame(compact: compact)
+        if compact && !showsIdlePill {
+            panel.setFrame(target, display: false)
+            panel.orderOut(nil)
+            return
+        }
+        panel.orderFrontRegardless()
         if animated {
             NSAnimationContext.runAnimationGroup { ctx in
                 ctx.duration = 0.19
@@ -85,7 +98,17 @@ final class HUD {
     func update(text: String)      { content.setTranscript(text) }
     func update(level: Float)      { content.setLevel(level) }
     func update(elapsed: TimeInterval) { content.setElapsed(elapsed) }
-    func update(target app: String?, icon: NSImage?) { content.setTarget(app, icon: icon) }
+    func update(target app: String?, icon: NSImage?) {
+        guard Date() >= (targetOverrideUntil ?? .distantPast) else { return }
+        content.setTarget(app, icon: icon)
+    }
+
+    /// Say something in the corner of the session bar for a moment, without
+    /// leaving the listening state — the transcript keeps streaming underneath.
+    func flashTarget(_ message: String, for seconds: TimeInterval = 2.5) {
+        targetOverrideUntil = Date().addingTimeInterval(seconds)
+        content.setTarget(message, icon: nil)
+    }
 
     func resetPosition() {
         UserDefaults.standard.removeObject(forKey: Self.anchorKey)
@@ -149,6 +172,31 @@ final class HUD {
         UserDefaults.standard.set(NSStringFromPoint(point), forKey: Self.anchorKey)
     }
 
+    /// Keeps a frame wholly inside a single display.
+    ///
+    /// The display is chosen by where the frame's centre is, so a pill can still be
+    /// dragged from one monitor to another — it just snaps fully onto whichever one
+    /// it is mostly on, instead of being left cut in half across the seam.
+    static func confine(_ rect: NSRect) -> NSRect {
+        let centre = NSPoint(x: rect.midX, y: rect.midY)
+        let screen = NSScreen.screens.first { $0.frame.contains(centre) }
+            ?? NSScreen.screens.min { a, b in
+                distance(from: centre, to: a.frame) < distance(from: centre, to: b.frame)
+            }
+        guard let visible = screen?.visibleFrame else { return rect }
+
+        var out = rect
+        out.origin.x = min(max(out.origin.x, visible.minX + 6), visible.maxX - out.width - 6)
+        out.origin.y = min(max(out.origin.y, visible.minY + 6), visible.maxY - out.height - 6)
+        return out
+    }
+
+    private static func distance(from point: NSPoint, to rect: NSRect) -> CGFloat {
+        let dx = max(rect.minX - point.x, 0, point.x - rect.maxX)
+        let dy = max(rect.minY - point.y, 0, point.y - rect.maxY)
+        return dx * dx + dy * dy
+    }
+
     private func frame(compact: Bool) -> NSRect {
         let size = compact ? compactSize : expandedSize
         let anchor = self.anchor
@@ -161,12 +209,9 @@ final class HUD {
             return NSRect(origin: .zero, size: size)
         }
 
-        var rect = NSRect(x: anchor.x - size.width, y: anchor.y, width: size.width, height: size.height)
-
-        // Clamp so growing leftwards can never push it off an edge.
-        rect.origin.x = min(max(rect.origin.x, visible.minX + 6), visible.maxX - size.width - 6)
-        rect.origin.y = min(max(rect.origin.y, visible.minY + 6), visible.maxY - size.height - 6)
-        return rect
+        _ = visible
+        let rect = NSRect(x: anchor.x - size.width, y: anchor.y, width: size.width, height: size.height)
+        return Self.confine(rect)
     }
 }
 
@@ -227,7 +272,7 @@ private final class HUDView: NSView {
         pin(tint, to: self)
 
         // — compact —
-        var config = NSImage.SymbolConfiguration(pointSize: 13, weight: .medium)
+        var config = NSImage.SymbolConfiguration(pointSize: 10, weight: .medium)
         config = config.applying(.init(paletteColors: [.white]))
         glyph.image = NSImage(systemSymbolName: "waveform", accessibilityDescription: "Quill")?
             .withSymbolConfiguration(config)
@@ -355,7 +400,9 @@ private final class HUDView: NSView {
                 toolTip = "Quill needs Accessibility to use the keyboard trigger — click to fix"
             } else {
                 glyph.contentTintColor = NSColor.white.withAlphaComponent(0.85)
-                alphaValue = hovering ? 0.95 : 0.38
+                // Deliberately faint at rest: it sits on screen all day and should
+                // read as a dot you can ignore, not something asking for attention.
+                alphaValue = hovering ? 0.92 : 0.22
                 toolTip = "Tap the trigger key to dictate · drag to move"
             }
 
@@ -463,12 +510,12 @@ private final class HUDView: NSView {
 
     override func mouseEntered(with event: NSEvent) {
         hovering = true
-        if isIdle { animator().alphaValue = 0.95 }
+        if isIdle { animator().alphaValue = 0.92 }
     }
 
     override func mouseExited(with event: NSEvent) {
         hovering = false
-        if isIdle { animator().alphaValue = 0.38 }
+        if isIdle { animator().alphaValue = 0.22 }
     }
 
     override func mouseDown(with event: NSEvent) {
@@ -483,7 +530,10 @@ private final class HUDView: NSView {
         let dy = now.y - origin.y
         if !didDrag && (abs(dx) + abs(dy)) < 3 { return }
         didDrag = true
-        window.setFrameOrigin(NSPoint(x: window.frame.origin.x + dx, y: window.frame.origin.y + dy))
+
+        var frame = window.frame
+        frame.origin = NSPoint(x: frame.origin.x + dx, y: frame.origin.y + dy)
+        window.setFrame(HUD.confine(frame), display: true)
         dragOrigin = now
     }
 

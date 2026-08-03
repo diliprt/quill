@@ -53,6 +53,7 @@ final class QuillApp: NSObject, NSApplicationDelegate {
     private var socketReady = false
     private var sawAnyText = false
     private var stopReason: StopReason = .hotkey
+    private var didRunVoiceCommand = false
     private var startedAt: Date?
 
     private var silenceTimer: Timer?
@@ -88,7 +89,8 @@ final class QuillApp: NSObject, NSApplicationDelegate {
             }
             self.toggle()
         }
-        if Defaults.bool(Defaults.cornerButton) { hud.install() }
+        hud.showsIdlePill = Defaults.bool(Defaults.cornerButton)
+        hud.install()
 
         hotkey.trigger = Defaults.currentTrigger
         applyTapMode()
@@ -250,8 +252,18 @@ final class QuillApp: NSObject, NSApplicationDelegate {
                   action: #selector(toggleClickToInsert))
         addToggle(to: menu, title: "Insert at end of field", key: Defaults.insertAtEnd,
                   action: #selector(toggleInsertAtEnd))
-        addToggle(to: menu, title: "Show corner button", key: Defaults.cornerButton,
+
+        let appearanceMenu = NSMenu()
+        appearanceMenu.autoenablesItems = false
+        addToggle(to: appearanceMenu, title: "Show idle pill", key: Defaults.cornerButton,
                   action: #selector(toggleCornerButton))
+        let resetItem = NSMenuItem(title: "Reset panel position",
+                                   action: #selector(resetPanelPosition), keyEquivalent: "")
+        resetItem.target = self
+        appearanceMenu.addItem(resetItem)
+        let appearanceItem = NSMenuItem(title: "Appearance", action: nil, keyEquivalent: "")
+        menu.addItem(appearanceItem)
+        menu.setSubmenu(appearanceMenu, for: appearanceItem)
 
         let triggerMenu = NSMenu()
         let activeTrigger = Defaults.currentTrigger
@@ -278,11 +290,6 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         let triggerItem = NSMenuItem(title: "Trigger", action: nil, keyEquivalent: "")
         menu.addItem(triggerItem)
         menu.setSubmenu(triggerMenu, for: triggerItem)
-
-        let recentre = NSMenuItem(title: "Reset panel position",
-                                  action: #selector(resetPanelPosition), keyEquivalent: "")
-        recentre.target = self
-        menu.addItem(recentre)
 
         let languageMenu = NSMenu()
         let current = UserDefaults.standard.string(forKey: Defaults.language) ?? "en"
@@ -367,8 +374,17 @@ final class QuillApp: NSObject, NSApplicationDelegate {
 
     @objc private func toggleCornerButton() {
         Defaults.flip(Defaults.cornerButton)
-        if Defaults.bool(Defaults.cornerButton) { hud.install() }
-        else { hud.setCornerButton(visible: false) }
+        let showing = Defaults.bool(Defaults.cornerButton)
+        hud.showsIdlePill = showing
+        Log.write("idle pill \(showing ? "shown" : "hidden")")
+
+        if !showing {
+            // With the pill gone there may be no visible affordance left — this
+            // Mac's menu bar is often too full to show another item — so say how
+            // to get it back before it disappears.
+            hud.apply(.notice("Idle pill hidden. \(Defaults.currentTrigger.gesture(singleTap: hotkey.singleTap)) still works; the menu-bar icon brings it back."))
+            hud.collapse(after: 6)
+        }
     }
 
     @objc private func setLanguage(_ sender: NSMenuItem) {
@@ -437,6 +453,7 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         socketReady = false
         sawAnyText = false
         stopReason = .hotkey
+        didRunVoiceCommand = false
 
         client.onReady = { [weak self] in
             guard let self else { return }
@@ -447,7 +464,14 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         client.onText = { [weak self] text in
             guard let self, !text.isEmpty else { return }
             self.sawAnyText = true
-            self.hud.update(text: text)
+
+            if !self.didRunVoiceCommand, VoiceCommands.containsOpenGrok(text) {
+                self.didRunVoiceCommand = true
+                self.runOpenGrok()
+            }
+
+            // Show what will actually be inserted, command phrase already removed.
+            self.hud.update(text: VoiceCommands.strip(text))
         }
         client.onComplete = { [weak self] text in self?.finishSession(with: text) }
         client.onFailure = { [weak self] failure in self?.abortSession(message: failure.message) }
@@ -557,6 +581,23 @@ final class QuillApp: NSObject, NSApplicationDelegate {
             + "socketReady=\(socketReady) sawText=\(sawAnyText)")
     }
 
+    /// Opens Grok Build without interrupting the recording — the mic keeps running
+    /// so the rest of the sentence still becomes the prompt.
+    private func runOpenGrok() {
+        Log.write("voice command: open Grok")
+        hud.flashTarget("opening Grok Build…", for: 8)
+        GrokLauncher.open { [weak self] outcome in
+            guard let self else { return }
+            switch outcome {
+            case .opened(let terminal):
+                self.hud.flashTarget("Grok Build opened in \(terminal)", for: 2)
+            case .failed(let message):
+                Log.write("  open Grok failed — \(message)")
+                self.hud.flashTarget("couldn't open Grok Build", for: 4)
+            }
+        }
+    }
+
     private func stopSession(reason: StopReason) {
         guard isRecording else { return }
         isRecording = false
@@ -577,10 +618,16 @@ final class QuillApp: NSObject, NSApplicationDelegate {
 
     private func finishSession(with text: String) {
         stt = nil
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        // The command phrase must never reach the target app.
+        let trimmed = VoiceCommands.strip(text).trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
-            hud.apply(.notice(diagnosis()))
-            hud.collapse(after: 4)
+            if didRunVoiceCommand {
+                hud.apply(.notice("Opened Grok Build"))
+                hud.collapse(after: 1.6)
+            } else {
+                hud.apply(.notice(diagnosis()))
+                hud.collapse(after: 4)
+            }
             return
         }
 
@@ -589,8 +636,10 @@ final class QuillApp: NSObject, NSApplicationDelegate {
 
         if selfTestPath != nil {
             FileHandle.standardError.write(Data("SELFTEST RESULT: \(trimmed)\n".utf8))
+            // Lets a test wait for background work (e.g. launching Grok) to finish.
+            let hold = Double(ProcessInfo.processInfo.environment["QUILL_SELFTEST_HOLD"] ?? "") ?? 0
             guard ProcessInfo.processInfo.environment["QUILL_SELFTEST_INSERT"] != nil else {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { NSApp.terminate(nil) }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2 + hold) { NSApp.terminate(nil) }
                 return
             }
             FileHandle.standardError.write(Data("SELFTEST FOCUS: \(Inserter.describeFocus())\n".utf8))

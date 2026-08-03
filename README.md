@@ -36,8 +36,24 @@ downloaded from the internet. See [Why the quarantine step](#why-the-quarantine-
 3. **Click wherever you want the words.** That click stops the recording *and* chooses the
    destination. Tap `Control` again instead if you want them where your cursor already is.
 
-The corner pill is clickable too, if you'd rather use the mouse for both ends. Drag it anywhere;
-it stays where you put it.
+The corner pill is clickable too, if you'd rather use the mouse for both ends. Drag it anywhere —
+it stays put, and never straddles two displays.
+
+### Say "open Grok" while you're talking
+
+Say **"open Grok"** or **"open Grok Build"** mid-sentence and Quill opens a Grok Build session for
+you *without stopping the recording* — so you can carry straight on and have the rest become your
+prompt:
+
+> "open Grok Build, then write me a haiku about rockets"
+
+…opens Grok and types only `then write me a haiku about rockets`. **The command phrase is always
+removed from the inserted text**, so it can never end up in a prompt. Speech-to-text mishearings
+("grog", "grock", "croc") are matched too.
+
+It opens Ghostty if you have it, otherwise Terminal, using an ordinary new window running a normal
+login shell — the same thing as opening a terminal and typing `grok` yourself, so your theme,
+scrollback and copy/paste all behave exactly as usual.
 
 ## What you need
 
@@ -65,7 +81,9 @@ Right-click the pill (or the menu-bar icon):
 - **Insert at end of field** — append after existing text rather than at the cursor
 - **Language** — 24 supported
 - **Recent** — your last 20 transcripts, click to copy
-- **Start at login**, **Show corner button**, **Reset panel position**
+- **Appearance** — "Show idle pill" (hide the resting dot entirely; the trigger key, menu-bar icon
+  and the session bar while dictating all keep working) and "Reset panel position"
+- **Start at login**
 
 ### About the trigger key
 

@@ -17,7 +17,7 @@ enum Log {
     private static let path = NSHomeDirectory() + "/Library/Logs/Quill.log"
     private static let formatter: DateFormatter = {
         let f = DateFormatter()
-        f.dateFormat = "HH:mm:ss"
+        f.dateFormat = "HH:mm:ss.SSS"
         return f
     }()
 
@@ -227,11 +227,15 @@ enum Inserter {
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.06) {
             pressCommandV()
-            // Give the target app time to actually read the pasteboard before
-            // we hand it back to whatever was on it.
+
+            // Report success as soon as the paste is on its way. The clipboard
+            // still has to be handed back, but the target app has the text by
+            // now — making the UI wait for the restore left the panel sitting
+            // there saying "Transcribing" after the words had already appeared.
+            completion()
+
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) {
                 restore(saved, to: pasteboard)
-                completion()
             }
         }
     }

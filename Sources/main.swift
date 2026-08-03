@@ -54,6 +54,7 @@ final class QuillApp: NSObject, NSApplicationDelegate {
     private var sawAnyText = false
     private var stopReason: StopReason = .hotkey
     private var didRunVoiceCommand = false
+    private var finaliseStartedAt: Date?
     private var startedAt: Date?
 
     private var silenceTimer: Timer?
@@ -611,6 +612,7 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         // the first recording the socket is often still connecting. Let it finish
         // and decide on the actual transcript instead.
         Log.write("stop (\(reason == .click ? "click" : "hotkey/pill")) — finalising, sawText=\(sawAnyText)")
+        finaliseStartedAt = Date()
         logAudioState()
         hud.apply(.thinking)
         stt?.finish()
@@ -652,6 +654,9 @@ final class QuillApp: NSObject, NSApplicationDelegate {
                 }
                 self.hud.apply(.delivered(outcome.app))
                 self.hud.update(text: trimmed)
+                // Success is reported as soon as ⌘V is posted, so give the target
+                // app a moment to actually apply it before reading back.
+                Thread.sleep(forTimeInterval: 0.6)
                 let readback = Inserter.focusedFieldValue() ?? "<field not readable>"
                 FileHandle.standardError.write(Data("""
                 SELFTEST METHOD: \(method) → \(outcome.app ?? "unknown app")
@@ -672,9 +677,13 @@ final class QuillApp: NSObject, NSApplicationDelegate {
             Inserter.insert(trimmed, atEndOfField: Defaults.bool(Defaults.insertAtEnd)) { outcome in
                 switch outcome.method {
                 case .accessibility, .clipboard:
+                    if let started = self.finaliseStartedAt {
+                        Log.write("  tail: stop → inserted in "
+                            + String(format: "%.2fs", Date().timeIntervalSince(started)))
+                    }
                     self.hud.apply(.delivered(outcome.app))
                     self.hud.update(text: trimmed)
-                    self.hud.collapse(after: 1.5)
+                    self.hud.collapse(after: 0.7)
                 case .blocked:
                     self.hud.apply(.notice("Grant Accessibility to Quill so it can write into apps"))
                     self.hud.collapse(after: 4)

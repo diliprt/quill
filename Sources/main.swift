@@ -269,7 +269,7 @@ final class QuillApp: NSObject, NSApplicationDelegate {
                   action: #selector(toggleClickToInsert))
         addToggle(to: menu, title: "Insert at end of field", key: Defaults.insertAtEnd,
                   action: #selector(toggleInsertAtEnd))
-        addToggle(to: menu, title: "Stop when I say \u{201C}that\u{2019}s it\u{201D}", key: Defaults.stopPhrase,
+        addToggle(to: menu, title: "Stop when I say \u{201C}that\u{2019}s it\u{201D} or \u{201C}that\u{2019}s all\u{201D}", key: Defaults.stopPhrase,
                   action: #selector(toggleStopPhrase))
 
         let appearanceMenu = NSMenu()

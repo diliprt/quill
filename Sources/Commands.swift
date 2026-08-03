@@ -21,7 +21,7 @@ enum VoiceCommands {
         return openGrok.firstMatch(in: text, range: range) != nil
     }
 
-    /// "that's it" — but only as the very last thing said.
+    /// "that's it" or "that's all" — but only as the very last thing said.
     ///
     /// Anchored to the end on purpose. The phrase is ordinary English in the middle
     /// of a sentence ("that's it exactly"), and stopping there would cut someone off

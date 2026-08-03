@@ -34,14 +34,14 @@ downloaded from the internet. See [Why the quarantine step](#why-the-quarantine-
 1. **Tap `Control`** — a panel appears in the corner and starts listening.
 2. **Talk.** The transcript streams in live as you speak.
 3. **Finish, any way you like:**
-   - **say "that's it"** — Quill stops and pastes; the phrase itself is never included
+   - **say "that's it"** or **"that's all"** — Quill stops and pastes; the phrase itself is never included
    - **click wherever you want the words** — the click both stops it and chooses the destination
    - **tap `Control` again** — lands them where your cursor already is
    - **press `Escape`** — throws the whole thing away and pastes nothing
 
-Saying "that's it" only stops when it is the *last* thing you say and nothing follows for a
-moment, so an ordinary "that's it exactly" mid-sentence will not cut you off. Turn it off in the
-menu if you'd rather.
+The finish phrase only stops when it is the *last* thing you say and nothing follows for a moment,
+so ordinary speech like "that's it exactly" or "that's all I need from you" will not cut you off.
+Turn it off in the menu if you'd rather.
 
 The corner pill is clickable too, if you'd rather use the mouse for both ends. Drag it anywhere —
 it stays put, and never straddles two displays.
@@ -86,7 +86,7 @@ Right-click the pill (or the menu-bar icon):
 - **Trigger** — `Control`, right `⌘`, right `⌥`, `🌐`, or `F5`; single tap or double tap
 - **Click anywhere to insert** — the click-to-choose-destination gesture
 - **Insert at end of field** — append after existing text rather than at the cursor
-- **Stop when I say "that's it"** — finish a dictation by voice alone
+- **Stop when I say "that's it" or "that's all"** — finish a dictation by voice alone
 - **Language** — 24 supported
 - **Recent** — your last 20 transcripts, click to copy
 - **Appearance** — "Show idle pill" (hide the resting dot entirely; the trigger key, menu-bar icon

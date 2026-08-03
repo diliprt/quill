@@ -5,6 +5,9 @@ cd "$(dirname "$0")"
 
 VERSION="${1:?usage: ./make-release.sh 0.1.0}"
 
+# Stamp it before building so the app and the release tag can never disagree.
+echo "$VERSION" > VERSION
+
 ./build.sh
 rm -rf dist && mkdir -p dist
 

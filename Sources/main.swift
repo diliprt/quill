@@ -4,6 +4,12 @@ import IOKit.hid
 
 // MARK: - Settings
 
+enum Build {
+    static var version: String {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?"
+    }
+}
+
 enum Defaults {
     static let language = "language"
     static let history = "history"
@@ -100,7 +106,7 @@ final class QuillApp: NSObject, NSApplicationDelegate {
 
         isTrusted = Inserter.isTrusted
         let inputMonitoring = IOHIDCheckAccess(kIOHIDRequestTypeListenEvent)
-        Log.write("launch — AXIsProcessTrusted=\(isTrusted) inputMonitoring=\(inputMonitoring.rawValue) "
+        Log.write("launch — Quill \(Build.version) — AXIsProcessTrusted=\(isTrusted) inputMonitoring=\(inputMonitoring.rawValue) "
             + "trigger=\(Defaults.currentTrigger.gesture(singleTap: Defaults.bool(Defaults.singleTap))) "
             + "bundle=\(Bundle.main.bundlePath)")
 
@@ -213,6 +219,10 @@ final class QuillApp: NSObject, NSApplicationDelegate {
     private func showMenu() {
         let menu = NSMenu()
         menu.autoenablesItems = false
+
+        let versionItem = NSMenuItem(title: "Quill \(Build.version)", action: nil, keyEquivalent: "")
+        versionItem.isEnabled = false
+        menu.addItem(versionItem)
 
         let account = Auth.load()
         let header = NSMenuItem(title: account.map { "Grok Build · \($0.email ?? "signed in")" }

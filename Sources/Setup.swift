@@ -123,7 +123,8 @@ final class SetupWindow: NSObject, NSWindowDelegate {
         title.font = .systemFont(ofSize: 24, weight: .semibold)
         title.translatesAutoresizingMaskIntoConstraints = false
 
-        let subtitle = NSTextField(labelWithString: "Speak anywhere. The text lands where you point.")
+        let subtitle = NSTextField(labelWithString:
+            "Speak anywhere. The text lands where you point.  ·  v\(Build.version)")
         subtitle.font = .systemFont(ofSize: 13)
         subtitle.textColor = .secondaryLabelColor
         subtitle.translatesAutoresizingMaskIntoConstraints = false

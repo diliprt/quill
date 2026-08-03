@@ -5,6 +5,8 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 APP_NAME="Quill"
+# Single source of truth: the app, the menu and the release tag all read this.
+VERSION="$(cat VERSION 2>/dev/null || echo 0.0.0)"
 BUNDLE_ID="com.freeze.quill"
 BUILD="build"
 APP="$BUILD/$APP_NAME.app"
@@ -41,8 +43,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleExecutable</key><string>$APP_NAME</string>
   <key>CFBundleIdentifier</key><string>$BUNDLE_ID</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>1.0</string>
-  <key>CFBundleVersion</key><string>1</string>
+  <key>CFBundleShortVersionString</key><string>$VERSION</string>
+  <key>CFBundleVersion</key><string>$VERSION</string>
   <key>LSMinimumSystemVersion</key><string>12.0</string>
   <key>LSUIElement</key><true/>
   <key>NSMicrophoneUsageDescription</key>
@@ -86,5 +88,5 @@ rm -rf "$DEST"
 mkdir -p "$HOME/Applications"
 cp -R "$APP" "$DEST"
 
-echo "✓ built $DEST"
+echo "✓ built $DEST (v$VERSION)"
 codesign -d -r- "$DEST" 2>&1 | grep designated | sed 's/^/  /' 

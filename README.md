@@ -43,8 +43,9 @@ The finish phrase only stops when it is the *last* thing you say and nothing fol
 so ordinary speech like "that's it exactly" or "that's all I need from you" will not cut you off.
 Turn it off in the menu if you'd rather.
 
-The corner pill is clickable too, if you'd rather use the mouse for both ends. Drag it anywhere —
-it stays put, and never straddles two displays.
+The corner pill is clickable too, if you'd rather use the mouse for both ends. **Drag it to any
+edge** and it snaps flush and stays there — the panel then opens inward from that edge, so it
+never sweeps across your screen.
 
 ### Say "open Grok" while you're talking
 

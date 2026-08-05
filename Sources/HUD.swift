@@ -22,11 +22,10 @@ final class HUD {
     private var state: State = .idle
     private var targetOverrideUntil: Date?
 
-    private let compactSize = NSSize(width: 34, height: 22)
-    private let expandedSize = NSSize(width: 430, height: 70)
-    private let margin: CGFloat = 18
+    private let compactSize = NSSize(width: 30, height: 30)
+    private let expandedSize = NSSize(width: 396, height: 68)
+    private let margin: CGFloat = 14
 
-    private static let anchorKey = "hudAnchor"
 
     var onClick: () -> Void = {}
 
@@ -43,7 +42,7 @@ final class HUD {
     func install() {
         let panel = ensurePanel()
         content.onClick = { [weak self] in self?.onClick() }
-        content.onMoved = { [weak self] in self?.storeAnchor() }
+        content.onMoved = { [weak self] rect in self?.snapToEdge(from: rect) }
         apply(.idle, animated: false)
         panel.orderFrontRegardless()
     }
@@ -77,14 +76,27 @@ final class HUD {
             return
         }
         panel.orderFrontRegardless()
-        if animated {
+
+        // No stretching across the screen. The docked edge is already fixed by
+        // frame(), so the panel simply appears at its size and cross-fades — a
+        // sweeping resize reads as a tail dragging over whatever is underneath.
+        // A wide soft shadow makes a small faint pill read as a big grey blob;
+        // the session panel earns one, the resting dot does not.
+        panel.hasShadow = !compact
+        panel.setFrame(target, display: true)
+
+        // Fade toward whatever alpha this state actually wants. Animating to 1
+        // unconditionally made the resting pill fully opaque instead of faint.
+        let resting = content.restingAlpha
+        if animated, panel.isVisible {
+            content.alphaValue = max(0.25, resting * 0.45)
             NSAnimationContext.runAnimationGroup { ctx in
-                ctx.duration = 0.19
-                ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 0.9, 0.25, 1)
-                panel.animator().setFrame(target, display: true)
+                ctx.duration = 0.12
+                ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                content.animator().alphaValue = resting
             }
         } else {
-            panel.setFrame(target, display: true)
+            content.alphaValue = resting
         }
     }
 
@@ -108,11 +120,6 @@ final class HUD {
     func flashTarget(_ message: String, for seconds: TimeInterval = 2.5) {
         targetOverrideUntil = Date().addingTimeInterval(seconds)
         content.setTarget(message, icon: nil)
-    }
-
-    func resetPosition() {
-        UserDefaults.standard.removeObject(forKey: Self.anchorKey)
-        apply(state, animated: true)
     }
 
     func collapse(after delay: TimeInterval) {
@@ -154,29 +161,85 @@ final class HUD {
         return panel
     }
 
-    /// Anchor = the bottom-right corner of the panel, in screen coordinates.
-    private var anchor: NSPoint {
-        if let stored = UserDefaults.standard.string(forKey: Self.anchorKey) {
-            let point = NSPointFromString(stored)
-            if point != .zero { return point }
-        }
-        let visible = (NSScreen.main ?? NSScreen.screens.first)?.visibleFrame ?? .zero
-        // Deliberately clear of the bottom edge: Grok Build and most chat apps put
-        // their input box there, and the panel would sit on top of it.
-        return NSPoint(x: visible.maxX - margin, y: visible.minY + 168)
-    }
-
-    private func storeAnchor() {
-        guard let panel else { return }
-        let point = NSPoint(x: panel.frame.maxX, y: panel.frame.minY)
-        UserDefaults.standard.set(NSStringFromPoint(point), forKey: Self.anchorKey)
-    }
-
-    /// Keeps a frame wholly inside a single display.
+    /// Where the panel lives: an edge, plus how far down that edge.
     ///
-    /// The display is chosen by where the frame's centre is, so a pill can still be
-    /// dragged from one monitor to another — it just snaps fully onto whichever one
-    /// it is mostly on, instead of being left cut in half across the seam.
+    /// Docking to an edge rather than storing a free position is what stops it
+    /// floating in the middle of the screen — and it fixes the expansion, which
+    /// used to always grow leftwards regardless of where the pill was, sweeping a
+    /// wide panel across whatever was underneath.
+    enum Edge: String { case left, right }
+
+    private static let edgeKey = "hudEdge"
+    private static let offsetKey = "hudEdgeOffset"
+
+    private var dockEdge: Edge {
+        get { Edge(rawValue: UserDefaults.standard.string(forKey: Self.edgeKey) ?? "") ?? .right }
+        set { UserDefaults.standard.set(newValue.rawValue, forKey: Self.edgeKey) }
+    }
+
+    /// Vertical centre of the panel, as a fraction of the screen's height.
+    private var dockOffset: CGFloat {
+        get {
+            let stored = UserDefaults.standard.object(forKey: Self.offsetKey) as? Double
+            return CGFloat(stored ?? 0.82)      // low, but clear of the dock
+        }
+        set { UserDefaults.standard.set(Double(newValue), forKey: Self.offsetKey) }
+    }
+
+    private var homeScreen: NSScreen? {
+        NSScreen.screens.first { $0.frame.contains(NSPoint(x: lastCentreX, y: lastCentreY)) }
+            ?? NSScreen.main ?? NSScreen.screens.first
+    }
+    private var lastCentreX: CGFloat = 0
+    private var lastCentreY: CGFloat = 0
+
+    func resetPosition() {
+        UserDefaults.standard.removeObject(forKey: Self.edgeKey)
+        UserDefaults.standard.removeObject(forKey: Self.offsetKey)
+        UserDefaults.standard.removeObject(forKey: "hudAnchor")
+        apply(state, animated: true)
+    }
+
+    /// Called when a drag finishes: pick the nearer edge and remember the height.
+    func snapToEdge(from frame: NSRect) {
+        let centre = NSPoint(x: frame.midX, y: frame.midY)
+        lastCentreX = centre.x
+        lastCentreY = centre.y
+        let screen = NSScreen.screens.first { $0.frame.contains(centre) }
+            ?? NSScreen.main ?? NSScreen.screens.first
+        guard let visible = screen?.visibleFrame else { return }
+
+        dockEdge = (centre.x - visible.minX) < (visible.maxX - centre.x) ? .left : .right
+        let fraction = (visible.maxY - centre.y) / max(visible.height, 1)
+        dockOffset = min(max(fraction, 0.04), 0.96)
+        apply(state, animated: true)
+    }
+
+    private func frame(compact: Bool) -> NSRect {
+        let size = compact ? compactSize : expandedSize
+        guard let visible = homeScreen?.visibleFrame else {
+            return NSRect(origin: .zero, size: size)
+        }
+
+        // The docked edge stays pinned; the panel only ever grows inward. That is
+        // what keeps expanding from sweeping across the screen.
+        let x = dockEdge == .left
+            ? visible.minX + margin
+            : visible.maxX - size.width - margin
+
+        let centreY = visible.maxY - dockOffset * visible.height
+        var rect = NSRect(x: x, y: centreY - size.height / 2, width: size.width, height: size.height)
+        rect.origin.y = min(max(rect.origin.y, visible.minY + 6), visible.maxY - size.height - 6)
+
+        lastCentreX = rect.midX
+        lastCentreY = rect.midY
+        if ProcessInfo.processInfo.environment["QUILL_TRACE_FRAME"] != nil {
+            Log.write("  frame compact=\(compact) rect=\(NSStringFromRect(rect)) visible=\(NSStringFromRect(visible))")
+        }
+        return rect
+    }
+
+    /// Keeps a frame wholly inside one display — used while dragging.
     static func confine(_ rect: NSRect) -> NSRect {
         let centre = NSPoint(x: rect.midX, y: rect.midY)
         let screen = NSScreen.screens.first { $0.frame.contains(centre) }
@@ -184,10 +247,9 @@ final class HUD {
                 distance(from: centre, to: a.frame) < distance(from: centre, to: b.frame)
             }
         guard let visible = screen?.visibleFrame else { return rect }
-
         var out = rect
-        out.origin.x = min(max(out.origin.x, visible.minX + 6), visible.maxX - out.width - 6)
-        out.origin.y = min(max(out.origin.y, visible.minY + 6), visible.maxY - out.height - 6)
+        out.origin.x = min(max(out.origin.x, visible.minX + 4), visible.maxX - out.width - 4)
+        out.origin.y = min(max(out.origin.y, visible.minY + 4), visible.maxY - out.height - 4)
         return out
     }
 
@@ -196,23 +258,6 @@ final class HUD {
         let dy = max(rect.minY - point.y, 0, point.y - rect.maxY)
         return dx * dx + dy * dy
     }
-
-    private func frame(compact: Bool) -> NSRect {
-        let size = compact ? compactSize : expandedSize
-        let anchor = self.anchor
-
-        // Whichever screen actually holds the anchor — never the mouse's screen.
-        let screen = NSScreen.screens.first { $0.frame.contains(anchor) }
-            ?? NSScreen.main
-            ?? NSScreen.screens.first
-        guard let visible = screen?.visibleFrame else {
-            return NSRect(origin: .zero, size: size)
-        }
-
-        _ = visible
-        let rect = NSRect(x: anchor.x - size.width, y: anchor.y, width: size.width, height: size.height)
-        return Self.confine(rect)
-    }
 }
 
 // MARK: -
@@ -220,10 +265,11 @@ final class HUD {
 private final class HUDView: NSView {
 
     var onClick: () -> Void = {}
-    var onMoved: () -> Void = {}
+    var onMoved: (NSRect) -> Void = { _ in }
 
     private let blur = NSVisualEffectView()
     private let tint = NSView()
+    private let gloss = NSView()
     private let compact = NSView()
     private let expanded = NSView()
 
@@ -239,10 +285,18 @@ private final class HUDView: NSView {
     private var hovering = false
     private var isIdle = true
     private var needsPermission = false
+
+    /// What this view should settle at once any transition finishes. Deliberately
+    /// faint while idle: the pill sits on screen all day and should read as
+    /// something you can ignore, not something asking for attention.
+    var restingAlpha: CGFloat {
+        guard isIdle else { return 1 }
+        if needsPermission { return hovering ? 1.0 : 0.85 }
+        return hovering ? 0.9 : 0.20
+    }
     private var dragOrigin: NSPoint?
     private var didDrag = false
 
-    private let fade = CAGradientLayer()
 
     init() {
         super.init(frame: .zero)
@@ -255,24 +309,35 @@ private final class HUDView: NSView {
     // MARK: Build
 
     private func build() {
-        blur.material = .hudWindow
+        blur.material = .fullScreenUI
         blur.blendingMode = .behindWindow
         blur.state = .active
         blur.wantsLayer = true
         blur.layer?.cornerCurve = .continuous
         blur.layer?.masksToBounds = true
         blur.layer?.borderWidth = 1
-        blur.layer?.borderColor = NSColor.white.withAlphaComponent(0.13).cgColor
+        blur.layer?.borderColor = NSColor.white.withAlphaComponent(0.16).cgColor
         pin(blur, to: self)
 
         tint.wantsLayer = true
-        tint.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.46).cgColor
+        tint.layer?.backgroundColor = NSColor(calibratedWhite: 0.07, alpha: 0.90).cgColor
         tint.layer?.cornerCurve = .continuous
         tint.layer?.masksToBounds = true
         pin(tint, to: self)
 
+        gloss.wantsLayer = true
+        gloss.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.07).cgColor
+        gloss.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(gloss)
+        NSLayoutConstraint.activate([
+            gloss.topAnchor.constraint(equalTo: topAnchor, constant: 1),
+            gloss.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
+            gloss.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
+            gloss.heightAnchor.constraint(equalToConstant: 1),
+        ])
+
         // — compact —
-        var config = NSImage.SymbolConfiguration(pointSize: 10, weight: .medium)
+        var config = NSImage.SymbolConfiguration(pointSize: 11, weight: .semibold)
         config = config.applying(.init(paletteColors: [.white]))
         glyph.image = NSImage(systemSymbolName: "waveform", accessibilityDescription: "Quill")?
             .withSymbolConfiguration(config)
@@ -290,14 +355,14 @@ private final class HUDView: NSView {
         dot.layer?.backgroundColor = NSColor.systemRed.cgColor
         dot.translatesAutoresizingMaskIntoConstraints = false
 
-        elapsedLabel.font = .monospacedDigitSystemFont(ofSize: 11.5, weight: .medium)
-        elapsedLabel.textColor = NSColor.white.withAlphaComponent(0.62)
+        elapsedLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .semibold)
+        elapsedLabel.textColor = NSColor.white.withAlphaComponent(0.55)
         elapsedLabel.translatesAutoresizingMaskIntoConstraints = false
 
         waveform.translatesAutoresizingMaskIntoConstraints = false
 
-        targetLabel.font = .systemFont(ofSize: 11.5, weight: .regular)
-        targetLabel.textColor = NSColor.white.withAlphaComponent(0.42)
+        targetLabel.font = .systemFont(ofSize: 11, weight: .medium)
+        targetLabel.textColor = NSColor.white.withAlphaComponent(0.48)
         targetLabel.alignment = .right
         targetLabel.lineBreakMode = .byTruncatingTail
         targetLabel.translatesAutoresizingMaskIntoConstraints = false
@@ -305,8 +370,8 @@ private final class HUDView: NSView {
         targetIcon.imageScaling = .scaleProportionallyDown
         targetIcon.translatesAutoresizingMaskIntoConstraints = false
 
-        transcriptLabel.font = .systemFont(ofSize: 13.5, weight: .regular)
-        transcriptLabel.textColor = NSColor.white.withAlphaComponent(0.94)
+        transcriptLabel.font = .systemFont(ofSize: 13, weight: .regular)
+        transcriptLabel.textColor = NSColor.white.withAlphaComponent(0.96)
         transcriptLabel.maximumNumberOfLines = 1
         transcriptLabel.lineBreakMode = .byTruncatingHead
         transcriptLabel.usesSingleLineMode = true
@@ -327,19 +392,19 @@ private final class HUDView: NSView {
         NSLayoutConstraint.activate([
             dot.widthAnchor.constraint(equalToConstant: 7),
             dot.heightAnchor.constraint(equalToConstant: 7),
-            dot.leadingAnchor.constraint(equalTo: expanded.leadingAnchor, constant: 18),
-            dot.topAnchor.constraint(equalTo: expanded.topAnchor, constant: 16),
+            dot.leadingAnchor.constraint(equalTo: expanded.leadingAnchor, constant: 16),
+            dot.topAnchor.constraint(equalTo: expanded.topAnchor, constant: 15),
 
-            elapsedLabel.leadingAnchor.constraint(equalTo: dot.trailingAnchor, constant: 9),
+            elapsedLabel.leadingAnchor.constraint(equalTo: dot.trailingAnchor, constant: 8),
             elapsedLabel.centerYAnchor.constraint(equalTo: dot.centerYAnchor),
 
-            waveform.leadingAnchor.constraint(equalTo: elapsedLabel.trailingAnchor, constant: 13),
+            waveform.leadingAnchor.constraint(equalTo: elapsedLabel.trailingAnchor, constant: 12),
             waveform.centerYAnchor.constraint(equalTo: dot.centerYAnchor),
-            waveform.heightAnchor.constraint(equalToConstant: 16),
+            waveform.heightAnchor.constraint(equalToConstant: 14),
             waveform.trailingAnchor.constraint(lessThanOrEqualTo: targetIcon.leadingAnchor, constant: -12),
-            waveform.widthAnchor.constraint(equalToConstant: 156),
+            waveform.widthAnchor.constraint(equalToConstant: 130),
 
-            targetLabel.trailingAnchor.constraint(equalTo: expanded.trailingAnchor, constant: -18),
+            targetLabel.trailingAnchor.constraint(equalTo: expanded.trailingAnchor, constant: -16),
             targetLabel.centerYAnchor.constraint(equalTo: dot.centerYAnchor),
 
             targetIcon.trailingAnchor.constraint(equalTo: targetLabel.leadingAnchor, constant: -6),
@@ -347,18 +412,12 @@ private final class HUDView: NSView {
             targetIcon.widthAnchor.constraint(equalToConstant: 14),
             targetIcon.heightAnchor.constraint(equalToConstant: 14),
 
-            transcriptLabel.leadingAnchor.constraint(equalTo: expanded.leadingAnchor, constant: 18),
-            transcriptLabel.trailingAnchor.constraint(equalTo: expanded.trailingAnchor, constant: -18),
-            transcriptLabel.bottomAnchor.constraint(equalTo: expanded.bottomAnchor, constant: -15),
+            transcriptLabel.leadingAnchor.constraint(equalTo: expanded.leadingAnchor, constant: 16),
+            transcriptLabel.trailingAnchor.constraint(equalTo: expanded.trailingAnchor, constant: -16),
+            transcriptLabel.bottomAnchor.constraint(equalTo: expanded.bottomAnchor, constant: -14),
             transcriptLabel.topAnchor.constraint(greaterThanOrEqualTo: dot.bottomAnchor, constant: 8),
         ])
 
-        // Text scrolls in from the left under a soft fade rather than a hard cut.
-        fade.colors = [NSColor.clear.cgColor, NSColor.black.cgColor, NSColor.black.cgColor]
-        fade.locations = [0, 0.07, 1]
-        fade.startPoint = CGPoint(x: 0, y: 0.5)
-        fade.endPoint = CGPoint(x: 1, y: 0.5)
-        transcriptLabel.layer?.mask = fade
     }
 
     private func pin(_ view: NSView, to parent: NSView) {
@@ -374,14 +433,11 @@ private final class HUDView: NSView {
 
     override func layout() {
         super.layout()
-        let radius = isIdle ? bounds.height / 2 : 21
+        let radius = isIdle ? min(bounds.width, bounds.height) / 2 : 19
         blur.layer?.cornerRadius = radius
         tint.layer?.cornerRadius = radius
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        fade.frame = transcriptLabel.bounds
+        gloss.isHidden = isIdle
         transcriptLabel.preferredMaxLayoutWidth = transcriptLabel.bounds.width
-        CATransaction.commit()
     }
 
     // MARK: State
@@ -396,35 +452,34 @@ private final class HUDView: NSView {
             waveform.reset()
             if needsPermission {
                 glyph.contentTintColor = .systemOrange
-                alphaValue = hovering ? 1.0 : 0.85
                 toolTip = "Quill needs Accessibility to use the keyboard trigger — click to fix"
             } else {
-                glyph.contentTintColor = NSColor.white.withAlphaComponent(0.85)
-                // Deliberately faint at rest: it sits on screen all day and should
-                // read as a dot you can ignore, not something asking for attention.
-                alphaValue = hovering ? 0.92 : 0.22
-                toolTip = "Tap the trigger key to dictate · drag to move"
+                glyph.contentTintColor = NSColor.white.withAlphaComponent(0.9)
+                toolTip = "Tap the trigger key to dictate · drag to an edge"
             }
 
         case .listening:
             enterExpanded()
             dot.layer?.backgroundColor = NSColor.systemRed.cgColor
             startPulse()
-            elapsedLabel.font = .monospacedDigitSystemFont(ofSize: 11.5, weight: .medium)
+            elapsedLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .semibold)
             elapsedLabel.stringValue = "0:00"
             elapsedLabel.isHidden = false
             waveform.isHidden = false
-            transcriptLabel.stringValue = "Listening… click where the text should go"
-            transcriptLabel.textColor = NSColor.white.withAlphaComponent(0.34)
+            transcriptLabel.stringValue = "Listening… click where the words should go"
+            transcriptLabel.textColor = NSColor.white.withAlphaComponent(0.38)
 
         case .thinking:
             enterExpanded()
             dot.layer?.backgroundColor = NSColor.systemOrange.cgColor
             stopPulse()
             waveform.isHidden = true
-            elapsedLabel.font = .systemFont(ofSize: 11.5, weight: .medium)
+            elapsedLabel.font = .systemFont(ofSize: 11, weight: .semibold)
             elapsedLabel.stringValue = "Transcribing"
             elapsedLabel.isHidden = false
+            if transcriptLabel.stringValue.hasPrefix("Listening") {
+                transcriptLabel.stringValue = ""
+            }
 
         case .delivered(let app):
             enterExpanded()
@@ -462,8 +517,12 @@ private final class HUDView: NSView {
     func setNeedsPermission(_ needed: Bool) { needsPermission = needed }
 
     func setTranscript(_ text: String) {
+        if ProcessInfo.processInfo.environment["QUILL_TRACE_FRAME"] != nil {
+            Log.write("  setTranscript(\"\(text.prefix(40))\") idle=\(isIdle) "
+                + "labelBounds=\(NSStringFromRect(transcriptLabel.bounds))")
+        }
         guard !isIdle else { return }
-        transcriptLabel.textColor = NSColor.white.withAlphaComponent(0.94)
+        transcriptLabel.textColor = NSColor.white.withAlphaComponent(0.96)
         transcriptLabel.stringValue = text
     }
 
@@ -510,12 +569,12 @@ private final class HUDView: NSView {
 
     override func mouseEntered(with event: NSEvent) {
         hovering = true
-        if isIdle { animator().alphaValue = 0.92 }
+        if isIdle { animator().alphaValue = restingAlpha }
     }
 
     override func mouseExited(with event: NSEvent) {
         hovering = false
-        if isIdle { animator().alphaValue = 0.22 }
+        if isIdle { animator().alphaValue = restingAlpha }
     }
 
     override func mouseDown(with event: NSEvent) {
@@ -540,7 +599,7 @@ private final class HUDView: NSView {
     override func mouseUp(with event: NSEvent) {
         dragOrigin = nil
         if didDrag {
-            onMoved()
+            onMoved(window?.frame ?? .zero)
         } else {
             onClick()
         }
@@ -554,12 +613,12 @@ private final class HUDView: NSView {
 /// than a flicker.
 private final class WaveformView: NSView {
 
-    private var samples = [CGFloat](repeating: 0, count: 46)
+    private var samples = [CGFloat](repeating: 0, count: 34)
     private var smoothed: CGFloat = 0
 
     func push(_ level: Float) {
         let value = max(0, min(1, CGFloat(level)))
-        smoothed = smoothed * 0.55 + value * 0.45
+        smoothed = smoothed * 0.62 + value * 0.38
         samples.removeFirst()
         samples.append(smoothed)
         needsDisplay = true
@@ -572,22 +631,22 @@ private final class WaveformView: NSView {
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        let barWidth: CGFloat = 2
+        let barWidth: CGFloat = 2.5
         let spacing = (bounds.width - CGFloat(samples.count) * barWidth) / CGFloat(samples.count - 1)
         let midY = bounds.midY
 
         for (index, sample) in samples.enumerated() {
-            // Newest sample on the right, and older samples fade back.
+            // Newest on the right; older samples recede rather than vanish.
             let recency = CGFloat(index) / CGFloat(samples.count - 1)
-            let alpha = 0.22 + 0.63 * recency
+            let alpha = 0.14 + 0.66 * recency
             NSColor.white.withAlphaComponent(alpha).setFill()
 
-            let height = max(3, bounds.height * (0.19 + 0.81 * sample))
+            let height = max(barWidth, bounds.height * (0.10 + 0.90 * sample))
             let rect = NSRect(x: CGFloat(index) * (barWidth + spacing),
                               y: midY - height / 2,
                               width: barWidth,
                               height: height)
-            NSBezierPath(roundedRect: rect, xRadius: 1, yRadius: 1).fill()
+            NSBezierPath(roundedRect: rect, xRadius: barWidth / 2, yRadius: barWidth / 2).fill()
         }
     }
 }

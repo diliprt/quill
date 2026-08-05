@@ -722,6 +722,8 @@ final class QuillApp: NSObject, NSApplicationDelegate {
             // Lets a test wait for background work (e.g. launching Grok) to finish.
             let hold = Double(ProcessInfo.processInfo.environment["QUILL_SELFTEST_HOLD"] ?? "") ?? 0
             guard ProcessInfo.processInfo.environment["QUILL_SELFTEST_INSERT"] != nil else {
+                hud.apply(.delivered(nil))
+                hud.collapse(after: 0.7)
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.2 + hold) { NSApp.terminate(nil) }
                 return
             }
@@ -738,6 +740,7 @@ final class QuillApp: NSObject, NSApplicationDelegate {
                 // Success is reported as soon as ⌘V is posted, so give the target
                 // app a moment to actually apply it before reading back.
                 Thread.sleep(forTimeInterval: 0.6)
+                self.hud.collapse(after: 0.7)
                 let readback = Inserter.focusedFieldValue() ?? "<field not readable>"
                 FileHandle.standardError.write(Data("""
                 SELFTEST METHOD: \(method) → \(outcome.app ?? "unknown app")

@@ -47,6 +47,22 @@ final class HUD {
         panel.orderFrontRegardless()
     }
 
+    /// Re-place the panel on the desktop that just became active.
+    private func handleSpaceChange() {
+        guard let panel else { return }
+        if case .idle = state, !showsIdlePill {
+            panel.orderOut(nil)
+            return
+        }
+        panel.setFrame(frame(compact: isCompactState), display: false)
+        panel.orderFrontRegardless()
+    }
+
+    private var isCompactState: Bool {
+        if case .idle = state { return true }
+        return false
+    }
+
     func setCornerButton(visible: Bool) {
         showsIdlePill = visible
     }
@@ -155,9 +171,19 @@ final class HUD {
         panel.hidesOnDeactivate = false
         panel.becomesKeyOnlyIfNeeded = true
         panel.isMovableByWindowBackground = false
-        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
+        panel.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary, .ignoresCycle]
         panel.contentView = content
         self.panel = panel
+
+        // Follow the user to whatever desktop they switch to, rather than being
+        // present on all of them at once. Joining every Space is what made it
+        // visible on both sides of a four-finger swipe — it looked like a tail
+        // stretched between desktops, and like the panel had never gone away.
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.activeSpaceDidChangeNotification,
+            object: nil, queue: .main) { [weak self] _ in
+                self?.handleSpaceChange()
+            }
         return panel
     }
 

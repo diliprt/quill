@@ -80,9 +80,23 @@ final class QuillApp: NSObject, NSApplicationDelegate {
     private var selfTestTimer: Timer?
     private let setup = SetupWindow()
 
+    /// Grok STT's own list, plus Chinese.
+    ///
+    /// Chinese is absent from the language table inside the grok CLI, but the
+    /// service transcribes it correctly — verified against the live endpoint with
+    /// `language=zh`, with the parameter omitted, and even with `language=en`.
+    /// The underlying model is evidently multilingual and that table is a UI
+    /// subset, so leaving Chinese out would have been an artificial limit.
     private let languages: [(String, String)] = [
-        ("English", "en"), ("Auto-detect", "auto"), ("Hindi", "hi"),
-        ("Spanish", "es"), ("French", "fr"), ("German", "de"), ("Japanese", "ja"),
+        ("Auto-detect", "auto"),
+        ("English", "en"),
+        ("Arabic", "ar"), ("Chinese", "zh"), ("Czech", "cs"), ("Danish", "da"),
+        ("Dutch", "nl"), ("Filipino", "fil"), ("French", "fr"), ("German", "de"),
+        ("Hindi", "hi"), ("Indonesian", "id"), ("Italian", "it"), ("Japanese", "ja"),
+        ("Korean", "ko"), ("Macedonian", "mk"), ("Malay", "ms"), ("Persian", "fa"),
+        ("Polish", "pl"), ("Portuguese", "pt"), ("Romanian", "ro"), ("Russian", "ru"),
+        ("Spanish", "es"), ("Swedish", "sv"), ("Thai", "th"), ("Turkish", "tr"),
+        ("Vietnamese", "vi"),
     ]
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -312,12 +326,13 @@ final class QuillApp: NSObject, NSApplicationDelegate {
 
         let languageMenu = NSMenu()
         let current = UserDefaults.standard.string(forKey: Defaults.language) ?? "en"
-        for (label, code) in languages {
-            let item = NSMenuItem(title: label, action: #selector(setLanguage(_:)), keyEquivalent: "")
+        for (index, entry) in languages.enumerated() {
+            let item = NSMenuItem(title: entry.0, action: #selector(setLanguage(_:)), keyEquivalent: "")
             item.target = self
-            item.representedObject = code
-            item.state = (code == current) ? .on : .off
+            item.representedObject = entry.1
+            item.state = (entry.1 == current) ? .on : .off
             languageMenu.addItem(item)
+            if index == 1 { languageMenu.addItem(.separator()) }
         }
         let languageItem = NSMenuItem(title: "Language", action: nil, keyEquivalent: "")
         menu.addItem(languageItem)

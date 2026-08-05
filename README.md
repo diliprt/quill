@@ -88,7 +88,8 @@ Right-click the pill (or the menu-bar icon):
 - **Click anywhere to insert** — the click-to-choose-destination gesture
 - **Insert at end of field** — append after existing text rather than at the cursor
 - **Stop when I say "that's it" or "that's all"** — finish a dictation by voice alone
-- **Language** — 24 supported
+- **Language** — 26 languages including Chinese, or auto-detect (which works well — the model
+  identifies the language on its own)
 - **Recent** — your last 20 transcripts, click to copy
 - **Appearance** — "Show idle pill" (hide the resting dot entirely; the trigger key, menu-bar icon
   and the session bar while dictating all keep working) and "Reset panel position"

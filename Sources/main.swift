@@ -20,6 +20,7 @@ enum Defaults {
     static let singleTap = "singleTap"
     static let didShowSetup = "didShowSetup"
     static let stopPhrase = "stopPhrase"
+    static let pauseSeconds = "pauseSeconds"
 
     static func register() {
         UserDefaults.standard.register(defaults: [
@@ -30,10 +31,16 @@ enum Defaults {
             trigger: Trigger.control.rawValue,
             singleTap: true,
             stopPhrase: true,
+            pauseSeconds: 3.0,
         ])
     }
 
     static func bool(_ key: String) -> Bool { UserDefaults.standard.bool(forKey: key) }
+
+    /// Seconds of silence that end a dictation. 0 turns it off.
+    static var pause: TimeInterval {
+        UserDefaults.standard.double(forKey: pauseSeconds)
+    }
 
     static var currentTrigger: Trigger {
         Trigger(rawValue: UserDefaults.standard.string(forKey: trigger) ?? "") ?? .rightCommand
@@ -66,6 +73,9 @@ final class QuillApp: NSObject, NSApplicationDelegate {
     private var finaliseStartedAt: Date?
     private var pendingVoiceStop: DispatchWorkItem?
     private var lastStopCandidate: String?
+    private var pendingPauseStop: DispatchWorkItem?
+    private var lastPauseCandidate: String?
+    private var capturedSelection: Inserter.Selection?
     private var startedAt: Date?
 
     private var silenceTimer: Timer?
@@ -298,6 +308,23 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         menu.addItem(appearanceItem)
         menu.setSubmenu(appearanceMenu, for: appearanceItem)
 
+        let pauseMenu = NSMenu()
+        pauseMenu.autoenablesItems = false
+        let pauseOptions: [(String, Double)] = [
+            ("Off", 0), ("After 1.5 seconds", 1.5), ("After 3 seconds", 3.0), ("After 5 seconds", 5.0),
+        ]
+        let currentPause = Defaults.pause
+        for (label, seconds) in pauseOptions {
+            let item = NSMenuItem(title: label, action: #selector(setPause(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = seconds
+            item.state = (abs(seconds - currentPause) < 0.01) ? .on : .off
+            pauseMenu.addItem(item)
+        }
+        let pauseItem = NSMenuItem(title: "Finish when I stop talking", action: nil, keyEquivalent: "")
+        menu.addItem(pauseItem)
+        menu.setSubmenu(pauseMenu, for: pauseItem)
+
         let triggerMenu = NSMenu()
         let activeTrigger = Defaults.currentTrigger
         for option in Trigger.allCases {
@@ -369,6 +396,16 @@ final class QuillApp: NSObject, NSApplicationDelegate {
 
     @objc private func toggleInsertAtEnd()   { Defaults.flip(Defaults.insertAtEnd) }
     @objc private func toggleStopPhrase()    { Defaults.flip(Defaults.stopPhrase) }
+
+    @objc private func setPause(_ sender: NSMenuItem) {
+        guard let seconds = sender.representedObject as? Double else { return }
+        UserDefaults.standard.set(seconds, forKey: Defaults.pauseSeconds)
+        Log.write("pause-to-finish set to \(seconds)s")
+        hud.apply(.notice(seconds == 0
+            ? "Won't finish on its own — stop it yourself"
+            : "Finishes after \(seconds == 1.5 ? "1.5" : String(Int(seconds))) seconds of silence"))
+        hud.collapse(after: 2.5)
+    }
     @objc private func toggleClickToInsert() { Defaults.flip(Defaults.clickToInsert) }
     @objc private func toggleLoginItem()     { LoginItem.setEnabled(!LoginItem.isEnabled) }
 
@@ -458,6 +495,10 @@ final class QuillApp: NSObject, NSApplicationDelegate {
     private func startSession() {
         guard !isRecording else { return }
 
+        // Grab the highlighted text now — clicking a destination later would
+        // destroy it, and this is the only moment it is reliably present.
+        capturedSelection = Inserter.captureSelection()
+
         if selfTestPath != nil {
             beginCapture()
             return
@@ -490,6 +531,7 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         stopReason = .hotkey
         didRunVoiceCommand = false
         lastStopCandidate = nil
+        lastPauseCandidate = nil
 
         client.onReady = { [weak self] in
             guard let self else { return }
@@ -507,6 +549,7 @@ final class QuillApp: NSObject, NSApplicationDelegate {
             }
 
             self.considerVoiceStop(after: text)
+            self.armPauseStop(after: text)
 
             // Show what will actually be inserted, command phrases already removed.
             self.hud.update(text: VoiceCommands.stripAll(text))
@@ -549,6 +592,9 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         startedAt = Date()
         refreshIcon()
         hud.apply(.listening)
+        if let selection = capturedSelection {
+            hud.flashTarget("replacing \(selection.range.length) selected characters", for: 3)
+        }
         let front = Inserter.frontmostApp()
         hud.update(target: front.name, icon: front.icon)
         hotkey.watchClicks = Defaults.bool(Defaults.clickToInsert)
@@ -681,6 +727,8 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         isRecording = false
         pendingVoiceStop?.cancel()
         pendingVoiceStop = nil
+        pendingPauseStop?.cancel()
+        pendingPauseStop = nil
         hotkey.watchClicks = false
         hotkey.watchForCancel(false)
         invalidateTimers()
@@ -692,12 +740,36 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         hud.collapse(after: 0.9)
     }
 
+    /// Finish once the words stop arriving.
+    ///
+    /// Silence is judged by the transcript going quiet rather than by microphone
+    /// level, because a noisy room keeps the level up while nobody is speaking.
+    /// The timer only restarts when the words actually change, so a server
+    /// re-sending an unchanged partial cannot hold the session open forever.
+    private func armPauseStop(after text: String) {
+        let window = Defaults.pause
+        guard window > 0, isRecording, !text.isEmpty, text != lastPauseCandidate else { return }
+        lastPauseCandidate = text
+
+        pendingPauseStop?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, self.isRecording else { return }
+            Log.write("pause stop: \(String(format: "%.1f", window))s without new speech")
+            self.hud.flashTarget("finishing…", for: 2)
+            self.stopSession(reason: .voice)
+        }
+        pendingPauseStop = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + window, execute: work)
+    }
+
     private func stopSession(reason: StopReason) {
         guard isRecording else { return }
         isRecording = false
         stopReason = reason
         pendingVoiceStop?.cancel()
         pendingVoiceStop = nil
+        pendingPauseStop?.cancel()
+        pendingPauseStop = nil
         hotkey.watchClicks = false
         hotkey.watchForCancel(false)
         invalidateTimers()
@@ -743,7 +815,11 @@ final class QuillApp: NSObject, NSApplicationDelegate {
                 return
             }
             FileHandle.standardError.write(Data("SELFTEST FOCUS: \(Inserter.describeFocus())\n".utf8))
-            Inserter.insert(trimmed, atEndOfField: Defaults.bool(Defaults.insertAtEnd)) { outcome in
+            let testSelection = self.capturedSelection
+            self.capturedSelection = nil
+            Inserter.insert(trimmed,
+                            atEndOfField: Defaults.bool(Defaults.insertAtEnd),
+                            replacing: testSelection) { outcome in
                 let method: String
                 switch outcome.method {
                 case .accessibility: method = "accessibility"
@@ -773,7 +849,11 @@ final class QuillApp: NSObject, NSApplicationDelegate {
 
         DispatchQueue.main.asyncAfter(deadline: .now() + settle) { [weak self] in
             guard let self else { return }
-            Inserter.insert(trimmed, atEndOfField: Defaults.bool(Defaults.insertAtEnd)) { outcome in
+            let selection = self.capturedSelection
+            self.capturedSelection = nil
+            Inserter.insert(trimmed,
+                            atEndOfField: Defaults.bool(Defaults.insertAtEnd),
+                            replacing: selection) { outcome in
                 switch outcome.method {
                 case .accessibility, .clipboard:
                     if let started = self.finaliseStartedAt {
@@ -797,6 +877,8 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         isRecording = false
         pendingVoiceStop?.cancel()
         pendingVoiceStop = nil
+        pendingPauseStop?.cancel()
+        pendingPauseStop = nil
         hotkey.watchClicks = false
         hotkey.watchForCancel(false)
         invalidateTimers()

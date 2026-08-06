@@ -120,9 +120,61 @@ enum Inserter {
         """
     }
 
+    // MARK: Selection capture
+
+    /// What was highlighted when the recording started.
+    ///
+    /// Captured up front rather than at insertion time, because by then the user
+    /// may have clicked elsewhere to choose a destination, which would have
+    /// destroyed the selection.
+    struct Selection {
+        let element: AXUIElement
+        let range: CFRange
+        let text: String
+    }
+
+    static func captureSelection() -> Selection? {
+        guard isTrusted, let element = focusedElement() else { return nil }
+
+        var textRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, kAXSelectedTextAttribute as CFString, &textRef) == .success,
+              let selected = textRef as? String,
+              !selected.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else { return nil }
+
+        var rangeRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, &rangeRef) == .success,
+              let value = rangeRef, CFGetTypeID(value) == AXValueGetTypeID()
+        else { return nil }
+
+        var range = CFRange()
+        // swiftlint:disable:next force_cast
+        guard AXValueGetValue(value as! AXValue, .cfRange, &range) else { return nil }
+
+        Log.write("captured selection: \(range.length) chars — \"\(selected.prefix(40))\"")
+        return Selection(element: element, range: range, text: selected)
+    }
+
+    /// Puts the original selection back so it can be written over. Fails if focus
+    /// has moved to a different element since.
+    private static func restore(_ selection: Selection) -> Bool {
+        guard let current = focusedElement(), CFEqual(current, selection.element) else {
+            Log.write("  selection dropped — focus moved to another field")
+            return false
+        }
+        var range = selection.range
+        guard let axRange = AXValueCreate(.cfRange, &range) else { return false }
+        return AXUIElementSetAttributeValue(selection.element,
+                                            kAXSelectedTextRangeAttribute as CFString,
+                                            axRange) == .success
+    }
+
     // MARK: Insertion
 
-    static func insert(_ text: String, atEndOfField: Bool, completion: @escaping (Outcome) -> Void) {
+    static func insert(_ text: String,
+                       atEndOfField: Bool,
+                       replacing selection: Selection? = nil,
+                       completion: @escaping (Outcome) -> Void) {
         let app = frontmostAppName()
         Log.write("insert → \(app ?? "?") · \(describeFocus()) · trusted=\(isTrusted)")
 
@@ -131,6 +183,22 @@ enum Inserter {
         // grant was given — which produced exactly this symptom: recording works
         // (the event tap gets re-armed) but nothing is ever written.
         var payload = text
+
+        // Replacing a selection wins over appending: the user highlighted
+        // something specific and expects exactly that to be swapped out.
+        if let selection, restore(selection) {
+            if setSelectedText(payload), confirmLanded(payload) {
+                Log.write("  → replaced selection (\(selection.range.length) chars)")
+                completion(Outcome(method: .accessibility, app: app))
+                return
+            }
+            // The selection is restored, so a paste will overwrite it too.
+            insertViaClipboard(payload) {
+                Log.write("  → replaced selection via paste")
+                completion(Outcome(method: isTrusted ? .clipboard : .blocked, app: app))
+            }
+            return
+        }
 
         // Move the caret to the end FIRST, independently of how the text gets in.
         // Plenty of apps let us set the selection range but not the selected text,

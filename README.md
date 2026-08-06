@@ -33,11 +33,16 @@ downloaded from the internet. See [Why the quarantine step](#why-the-quarantine-
 
 1. **Tap `Control`** — a panel appears in the corner and starts listening.
 2. **Talk.** The transcript streams in live as you speak.
-3. **Finish, any way you like:**
+3. **Finish, any way you like — or just stop talking:**
+   - **say nothing for 3 seconds** — it finishes on its own and pastes. Adjustable, or off
    - **say "that's it"** or **"that's all"** — Quill stops and pastes; the phrase itself is never included
    - **click wherever you want the words** — the click both stops it and chooses the destination
    - **tap `Control` again** — lands them where your cursor already is
    - **press `Escape`** — throws the whole thing away and pastes nothing
+
+**Replacing text:** highlight something first, then dictate — what you say replaces the
+selection instead of being appended. The highlight is captured the moment you press the trigger,
+so it survives you clicking elsewhere afterwards.
 
 The finish phrase only stops when it is the *last* thing you say and nothing follows for a moment,
 so ordinary speech like "that's it exactly" or "that's all I need from you" will not cut you off.
@@ -88,6 +93,7 @@ Right-click the pill (or the menu-bar icon):
 - **Click anywhere to insert** — the click-to-choose-destination gesture
 - **Insert at end of field** — append after existing text rather than at the cursor
 - **Stop when I say "that's it" or "that's all"** — finish a dictation by voice alone
+- **Finish when I stop talking** — off, or after 1.5 / 3 / 5 seconds of silence
 - **Language** — 26 languages including Chinese, or auto-detect (which works well — the model
   identifies the language on its own)
 - **Recent** — your last 20 transcripts, click to copy

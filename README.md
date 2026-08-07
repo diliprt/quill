@@ -5,7 +5,7 @@
 > **This repository** ([diliprt/quill](https://github.com/diliprt/quill)) is a public fork of
 > [xfreeze2/quill](https://github.com/xfreeze2/quill). Upstream behaviour is preserved; this
 > fork adds hold-to-talk, dual-key Grok cleanup, and a local personal dictionary.
-> Current fork build: **0.5.4**.
+> Current fork build: **0.5.5**.
 
 Tap a key, talk, then click into whatever window you want the words in. They appear there — at
 the end of what's already written, without touching your clipboard.
@@ -23,7 +23,7 @@ Additions on top of upstream (menu-bar right-click → settings):
 |--------|----------------|
 | **Hold to talk** | Push-to-talk: press and hold the trigger to listen, release to stop and insert. Also still supports single-tap / double-tap toggle. |
 | **Dual triggers** | **Simple key** — raw speech-to-text only. **Smart key** — STT, then a fast Grok cleanup pass (grammar, filler, punctuation), then insert. Keys are chosen independently so you can keep both modes. |
-| **Clean up with Grok** | Toggle + smart-key picker. Uses the same Grok Build session as STT (`~/.grok/auth.json`). On cleanup failure, pastes the raw transcript. |
+| **Clean up with Grok** | Toggle + smart-key picker. Uses the same Grok Build session as STT (`~/.grok/auth.json`). Cleanup prompt follows FreeFlow / MacWhisper / Superwhisper patterns: not-an-assistant, self-corrections, filler removal, spoken punctuation, dictionary as spelling-only. On failure, pastes raw transcript. |
 | **Personal dictionary** | Local-only library of *unique* terms (names, products, jargon — not everyday English). Fed into cleanup as spelling reference. Stored at `~/Library/Application Support/com.freeze.quill/vocabulary.json`. Learn while dictating, or **Add term…** / remove from the menu. No history seeding. |
 
 ### Typical layout (example)

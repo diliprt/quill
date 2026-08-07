@@ -127,8 +127,8 @@ enum Vocabulary {
         let entries = all().prefix(limit)
         guard !entries.isEmpty else { return "" }
         var lines: [String] = [
-            "PERSONAL DICTIONARY (user's unique names/terms — preserve these spellings exactly;",
-            "if the transcript sounds like one of the aliases, write the preferred term):",
+            "PERSONAL DICTIONARY (unique names/terms — spelling reference only;",
+            "correct close mishearings to the preferred term; never insert a term that was not spoken):",
         ]
         for e in entries {
             if e.aliases.isEmpty {

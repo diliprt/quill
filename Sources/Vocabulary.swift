@@ -117,6 +117,15 @@ enum Vocabulary {
         set { UserDefaults.standard.set(newValue, forKey: "vocabLearning") }
     }
 
+    /// Watch the field after paste and learn when the user hand-edits.
+    static var learnFromEditsEnabled: Bool {
+        get {
+            if UserDefaults.standard.object(forKey: "vocabLearnFromEdits") == nil { return true }
+            return UserDefaults.standard.bool(forKey: "vocabLearnFromEdits")
+        }
+        set { UserDefaults.standard.set(newValue, forKey: "vocabLearnFromEdits") }
+    }
+
     /// Terms sorted for the menu (pinned first, then count).
     static func listed(limit: Int = 40) -> [Entry] {
         Array(all().prefix(limit))
@@ -159,16 +168,62 @@ enum Vocabulary {
 
     /// Learn preferred spellings + STT aliases from a cleanup pass.
     static func learnFromCleanup(raw: String, cleaned: String) {
-        guard learningEnabled else { return }
+        let n = learnPair(raw: raw, preferredSource: cleaned, pinPreferred: false)
+        if n > 0 {
+            Log.write("vocab: cleanup taught \(n) update(s) (library=\(count()))")
+        }
+    }
 
-        // Preferred forms come from cleaned text (unique terms only).
-        let preferred = extractUniqueTerms(from: cleaned)
-        // Raw unique tokens may be mishearings of the same things.
+    /// Learn from the user hand-editing text after Quill inserted it.
+    ///
+    /// - `original`: the exact string Quill pasted
+    /// - `fieldBefore`: field contents shortly after paste (when readable)
+    /// - `fieldAfter`: field contents after the user stopped editing
+    ///
+    /// Preferred spellings come from the edited text; aliases come from the
+    /// original STT/cleaned paste. Returns how many dictionary updates were made.
+    @discardableResult
+    static func learnFromUserEdit(original: String, fieldBefore: String, fieldAfter: String) -> Int {
+        guard learningEnabled else { return 0 }
+        let o = original.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !o.isEmpty, fieldBefore != fieldAfter else { return 0 }
+
+        // Isolate the middle span that actually changed (ignores typing far away).
+        let (oldMid, newMid) = editedMiddles(before: fieldBefore, after: fieldAfter)
+        let base = !oldMid.isEmpty ? oldMid : o
+        let edited = !newMid.isEmpty ? newMid : fieldAfter
+
+        // No meaningful change to our inserted text (only typed elsewhere).
+        if edited.contains(o), oldMid.isEmpty || oldMid.contains(o) {
+            // Still learn unique terms from any brand-new unique words in the edit span.
+            if !newMid.isEmpty, !newMid.contains(o) {
+                // fall through
+            } else if fieldAfter.contains(o) {
+                return 0
+            }
+        }
+
+        var total = learnPair(raw: base, preferredSource: edited, pinPreferred: false)
+        total += learnWordSubstitutions(from: base, to: edited)
+        // Also align original insert against the edited middle when they differ.
+        if base != o {
+            total += learnPair(raw: o, preferredSource: edited, pinPreferred: false)
+            total += learnWordSubstitutions(from: o, to: edited)
+        }
+        if total > 0 {
+            Log.write("vocab: user edit taught \(total) update(s) (library=\(count()))")
+        }
+        return total
+    }
+
+    /// Shared path: preferred terms + mishearing aliases from two strings.
+    @discardableResult
+    private static func learnPair(raw: String, preferredSource: String, pinPreferred: Bool) -> Int {
+        guard learningEnabled else { return 0 }
+        let preferred = extractUniqueTerms(from: preferredSource)
         let rawTokens = extractUniqueTerms(from: raw)
 
         var aliasPairs: [(preferred: String, alias: String)] = []
-        // Same-length-ish token alignment: if cleaned has "Signara" and raw has
-        // "Signa" / "Signora", record as alias when they share a long prefix.
         for p in preferred {
             for r in rawTokens where r.compare(p, options: .caseInsensitive) != .orderedSame {
                 if looksLikeMishearing(heard: r, preferred: p) {
@@ -177,11 +232,9 @@ enum Vocabulary {
             }
         }
 
-        // Also scan for multi-word preferred phrases vs single raw lumps.
         for p in preferred {
             let pl = p.lowercased()
             let rawLower = raw.lowercased()
-            // If preferred is multi-word and raw doesn't contain it, try fuzzy.
             if p.contains(" "), !rawLower.contains(pl) {
                 let compact = pl.replacingOccurrences(of: " ", with: "")
                 for r in rawTokens {
@@ -196,17 +249,82 @@ enum Vocabulary {
         var changed = 0
         mutate { entries in
             for term in preferred {
-                if upsert(term, alias: nil, pinned: false, into: &entries) { changed += 1 }
+                if upsert(term, alias: nil, pinned: pinPreferred, into: &entries) { changed += 1 }
             }
             for pair in aliasPairs {
-                if upsert(pair.preferred, alias: pair.alias, pinned: false, into: &entries) {
+                if upsert(pair.preferred, alias: pair.alias, pinned: pinPreferred, into: &entries) {
                     changed += 1
                 }
             }
         }
-        if changed > 0 {
-            Log.write("vocab: cleanup taught \(changed) update(s) (library=\(count()))")
+        return changed
+    }
+
+    /// Token-level substitutions when the user fixes one word to another.
+    /// e.g. "Signa" → "Signara" in roughly the same place.
+    @discardableResult
+    private static func learnWordSubstitutions(from raw: String, to edited: String) -> Int {
+        let a = tokenizeWords(raw)
+        let b = tokenizeWords(edited)
+        guard !a.isEmpty, !b.isEmpty else { return 0 }
+
+        var changed = 0
+        // Similar-length sequences: pair by index.
+        if abs(a.count - b.count) <= 2, min(a.count, b.count) >= 1 {
+            let n = min(a.count, b.count)
+            for i in 0..<n {
+                let left = a[i], right = b[i]
+                if left.compare(right, options: .caseInsensitive) == .orderedSame { continue }
+                if isCommonWord(left), isCommonWord(right) { continue }
+                // Prefer unique-looking preferred form.
+                if looksUnique(right) || looksUnique(left) {
+                    let preferred = looksUnique(right) ? right : left
+                    let alias = preferred.compare(right, options: .caseInsensitive) == .orderedSame ? left : right
+                    if preferred.compare(alias, options: .caseInsensitive) != .orderedSame {
+                        mutate { entries in
+                            if upsert(preferred, alias: alias, pinned: false, into: &entries) {
+                                changed += 1
+                            }
+                        }
+                    }
+                }
+            }
         }
+
+        // Also: unique tokens that disappeared vs new unique tokens (mishearing map).
+        let aUnique = a.filter { looksUnique($0) && !isCommonWord($0) }
+        let bUnique = b.filter { looksUnique($0) && !isCommonWord($0) }
+        for r in aUnique {
+            if bUnique.contains(where: { $0.compare(r, options: .caseInsensitive) == .orderedSame }) {
+                continue
+            }
+            for p in bUnique where looksLikeMishearing(heard: r, preferred: p) {
+                mutate { entries in
+                    if upsert(p, alias: r, pinned: false, into: &entries) { changed += 1 }
+                }
+            }
+        }
+        return changed
+    }
+
+    /// Longest common prefix/suffix → middle spans that changed.
+    private static func editedMiddles(before: String, after: String) -> (String, String) {
+        let b = Array(before)
+        let a = Array(after)
+        var i = 0
+        while i < b.count, i < a.count, b[i] == a[i] { i += 1 }
+        var j = 0
+        while j < (b.count - i), j < (a.count - i),
+              b[b.count - 1 - j] == a[a.count - 1 - j] { j += 1 }
+        let oldMid = String(b[i..<(b.count - j)])
+        let newMid = String(a[i..<(a.count - j)])
+        return (oldMid, newMid)
+    }
+
+    private static func tokenizeWords(_ text: String) -> [String] {
+        text.components(separatedBy: CharacterSet.alphanumerics.inverted)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
     }
 
     /// Manual add from menu (pinned so it never auto-drops).

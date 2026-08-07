@@ -28,6 +28,8 @@ enum Defaults {
     static let cleanupTrigger = "cleanupTrigger"
     /// Learn unique personal terms into the local vocabulary file.
     static let vocabLearning = "vocabLearning"
+    /// After paste, re-read the field and learn from hand edits.
+    static let vocabLearnFromEdits = "vocabLearnFromEdits"
 
     static func register() {
         UserDefaults.standard.register(defaults: [
@@ -44,6 +46,7 @@ enum Defaults {
             cleanupEnabled: false,
             cleanupTrigger: Trigger.rightOption.rawValue,
             vocabLearning: true,
+            vocabLearnFromEdits: true,
         ])
     }
 
@@ -142,6 +145,9 @@ final class QuillApp: NSObject, NSApplicationDelegate {
     private var tickTimer: Timer?
     private var trustTimer: Timer?
     private var isTrusted = false
+
+    /// Watches the focused field after paste so hand-edits teach the dictionary.
+    private let editWatch = PostInsertEditWatch()
 
     /// QUILL_SELFTEST=<file.pcm> replaces the microphone with a 16 kHz mono PCM16
     /// file, so the socket → transcript → insert path can be verified headlessly.
@@ -410,6 +416,14 @@ final class QuillApp: NSObject, NSApplicationDelegate {
             + "Cleanup uses this list to keep spellings consistent."
         vocabMenu.addItem(learnItem)
 
+        let editItem = NSMenuItem(title: "Learn from my edits after paste",
+                                  action: #selector(toggleVocabLearnFromEdits), keyEquivalent: "")
+        editItem.target = self
+        editItem.state = Vocabulary.learnFromEditsEnabled ? .on : .off
+        editItem.toolTip = "After Quill inserts text, if you fix a word in an Accessibility-readable "
+            + "field, that correction is added to the personal dictionary."
+        vocabMenu.addItem(editItem)
+
         let addItem = NSMenuItem(title: "Add term…", action: #selector(addVocabTerm), keyEquivalent: "")
         addItem.target = self
         vocabMenu.addItem(addItem)
@@ -651,6 +665,17 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         hud.collapse(after: 2.5)
     }
 
+    @objc private func toggleVocabLearnFromEdits() {
+        Vocabulary.learnFromEditsEnabled.toggle()
+        let on = Vocabulary.learnFromEditsEnabled
+        Log.write("vocab learn-from-edits = \(on)")
+        if !on { editWatch.cancel() }
+        hud.apply(.notice(on
+            ? "Will learn dictionary terms from your post-paste edits"
+            : "Won't watch fields for edits"))
+        hud.collapse(after: 2.6)
+    }
+
     @objc private func addVocabTerm() {
         let alert = NSAlert()
         alert.messageText = "Add personal term"
@@ -809,6 +834,8 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         guard !isRecording else { return }
         sessionFromHold = fromHold
         sessionUsesCleanup = cleanup
+        // A new dictation supersedes any pending post-paste edit watch.
+        editWatch.cancel()
 
         // Grab the highlighted text now — clicking a destination later would
         // destroy it, and this is the only moment it is reliably present.
@@ -1258,6 +1285,8 @@ final class QuillApp: NSObject, NSApplicationDelegate {
                     self.hud.apply(.delivered(outcome.app))
                     self.hud.update(text: text)
                     self.hud.collapse(after: 0.7)
+                    // Watch for hand-edits in AX-readable fields → personal dictionary.
+                    self.armEditWatch(afterInserting: text)
                 case .blocked:
                     self.hud.apply(.notice("Grant Accessibility to Quill so it can write into apps"))
                     self.hud.collapse(after: 4)
@@ -1300,6 +1329,134 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         var history = UserDefaults.standard.stringArray(forKey: Defaults.history) ?? []
         history.insert(text, at: 0)
         UserDefaults.standard.set(Array(history.prefix(20)), forKey: Defaults.history)
+    }
+
+    /// After a successful paste, watch the field for hand-edits and grow the dictionary.
+    private func armEditWatch(afterInserting text: String) {
+        guard Vocabulary.learningEnabled, Vocabulary.learnFromEditsEnabled else { return }
+        editWatch.start(original: text) { [weak self] learned in
+            guard let self, learned > 0 else { return }
+            self.hud.apply(.notice(learned == 1
+                ? "Learned 1 term from your edit"
+                : "Learned \(learned) terms from your edit"))
+            self.hud.collapse(after: 2.2)
+        }
+    }
+}
+
+// MARK: - Post-insert edit → vocabulary
+
+/// Re-reads the focused field for a short window after paste. When the user
+/// changes the text and then pauses, diffs it against the original insert and
+/// teaches the personal dictionary (preferred spellings + aliases).
+///
+/// Only works in Accessibility-readable fields (native text views, many apps).
+/// Web/terminal clipboard fallbacks often can't be re-read — those are skipped.
+final class PostInsertEditWatch {
+    private var timer: Timer?
+    private var original = ""
+    private var fieldBefore = ""
+    private var lastSeen = ""
+    private var stableTicks = 0
+    private var ticks = 0
+    private var sawChange = false
+    private var onLearned: ((Int) -> Void)?
+
+    private let maxTicks = 30          // ~30s at 1s interval
+    private let settleTicks = 2        // unchanged reads after a change
+    private let settleDelay: TimeInterval = 0.55
+
+    func cancel() {
+        timer?.invalidate()
+        timer = nil
+        original = ""
+        fieldBefore = ""
+        lastSeen = ""
+        stableTicks = 0
+        ticks = 0
+        sawChange = false
+        onLearned = nil
+    }
+
+    func start(original: String, onLearned: @escaping (Int) -> Void) {
+        cancel()
+        let o = original.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !o.isEmpty else { return }
+        self.original = o
+        self.onLearned = onLearned
+
+        // Let paste settle, then snapshot the field.
+        DispatchQueue.main.asyncAfter(deadline: .now() + settleDelay) { [weak self] in
+            guard let self, !self.original.isEmpty else { return }
+            guard let snapshot = Inserter.focusedFieldValue(), !snapshot.isEmpty else {
+                Log.write("vocab: edit-watch skipped — field not readable via Accessibility")
+                self.cancel()
+                return
+            }
+            self.fieldBefore = snapshot
+            self.lastSeen = snapshot
+            self.ticks = 0
+            self.stableTicks = 0
+            self.sawChange = false
+            self.timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+                self?.tick()
+            }
+            Log.write("vocab: edit-watch armed for \(o.count) chars")
+        }
+    }
+
+    private func tick() {
+        ticks += 1
+        if ticks > maxTicks {
+            // Timed out — if they changed and then left it, still try once.
+            if sawChange, lastSeen != fieldBefore {
+                finish(with: lastSeen)
+            } else {
+                cancel()
+            }
+            return
+        }
+
+        guard let now = Inserter.focusedFieldValue() else {
+            // Focus left a readable field — learn from last seen if it changed.
+            if sawChange, lastSeen != fieldBefore {
+                finish(with: lastSeen)
+            } else {
+                cancel()
+            }
+            return
+        }
+
+        if now == lastSeen {
+            if sawChange {
+                stableTicks += 1
+                if stableTicks >= settleTicks {
+                    finish(with: now)
+                }
+            }
+            return
+        }
+
+        // Field content changed.
+        lastSeen = now
+        if now != fieldBefore {
+            sawChange = true
+            stableTicks = 0
+        }
+    }
+
+    private func finish(with fieldAfter: String) {
+        let o = original
+        let before = fieldBefore
+        let callback = onLearned
+        cancel()
+        guard fieldAfter != before else { return }
+        let learned = Vocabulary.learnFromUserEdit(original: o,
+                                                   fieldBefore: before,
+                                                   fieldAfter: fieldAfter)
+        if learned > 0 {
+            callback?(learned)
+        }
     }
 }
 

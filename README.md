@@ -5,7 +5,7 @@
 > **This repository** ([diliprt/quill](https://github.com/diliprt/quill)) is a public fork of
 > [xfreeze2/quill](https://github.com/xfreeze2/quill). Upstream behaviour is preserved; this
 > fork adds hold-to-talk, dual-key Grok cleanup, and a local personal dictionary.
-> Current fork build: **0.6.1** (tracks upstream [v0.6.0](https://github.com/xfreeze2/quill/releases/tag/v0.6.0) ideas; keeps dual-key cleanup + dictionary).
+> Current fork build: **0.6.2** (tracks upstream [v0.6.0](https://github.com/xfreeze2/quill/releases/tag/v0.6.0) ideas; keeps dual-key cleanup + dictionary).
 
 Tap a key, talk, then click into whatever window you want the words in. They appear there — at
 the end of what's already written, without touching your clipboard.
@@ -24,7 +24,7 @@ Additions on top of upstream (menu-bar right-click → settings):
 | **Hold to talk** | Push-to-talk: press and hold the trigger to listen, release to stop and insert. Also still supports single-tap / double-tap toggle. |
 | **Dual triggers** | **Simple key** — raw speech-to-text only. **Smart key** — STT, then a fast Grok cleanup pass (grammar, filler, punctuation), then insert. Keys are chosen independently so you can keep both modes. |
 | **Clean up with Grok** | Toggle + smart-key picker. STT → Grok cleanup → insert. Prompt uses OpenWhispr-style `<transcript>` wrapping + FreeFlow/Superwhisper rules. Imports upstream **0.6.0** safety: connection warm-up while speaking, and reject rewrites that don’t still look like your words (≥~65–70% word overlap) — then paste raw. |
-| **Personal dictionary** | Local-only library of *unique* terms (names, products, jargon — not everyday English). Fed into cleanup as spelling reference. Stored at `~/Library/Application Support/com.freeze.quill/vocabulary.json`. Learn while dictating, or **Add term…** / remove from the menu. No history seeding. |
+| **Personal dictionary** | Local-only library of *unique* terms (names, products, jargon — not everyday English). Fed into cleanup as spelling reference. Stored at `~/Library/Application Support/com.freeze.quill/vocabulary.json`. Learns while dictating, from cleanup pairs, and from **your hand-edits after paste** (Accessibility-readable fields, ~30s window). Or **Add term…** / remove from the menu. |
 
 ### Typical layout (example)
 

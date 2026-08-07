@@ -2,6 +2,11 @@
 
 **Speak anywhere on your Mac. The text lands where you point.**
 
+> **This repository** ([diliprt/quill](https://github.com/diliprt/quill)) is a public fork of
+> [xfreeze2/quill](https://github.com/xfreeze2/quill). Upstream behaviour is preserved; this
+> fork adds hold-to-talk, dual-key Grok cleanup, and a local personal dictionary.
+> Current fork build: **0.5.4**.
+
 Tap a key, talk, then click into whatever window you want the words in. They appear there — at
 the end of what's already written, without touching your clipboard.
 
@@ -10,7 +15,49 @@ nothing metered.
 
 ---
 
+## What's new in this fork
+
+Additions on top of upstream (menu-bar right-click → settings):
+
+| Feature | What it does |
+|--------|----------------|
+| **Hold to talk** | Push-to-talk: press and hold the trigger to listen, release to stop and insert. Also still supports single-tap / double-tap toggle. |
+| **Dual triggers** | **Simple key** — raw speech-to-text only. **Smart key** — STT, then a fast Grok cleanup pass (grammar, filler, punctuation), then insert. Keys are chosen independently so you can keep both modes. |
+| **Clean up with Grok** | Toggle + smart-key picker. Uses the same Grok Build session as STT (`~/.grok/auth.json`). On cleanup failure, pastes the raw transcript. |
+| **Personal dictionary** | Local-only library of *unique* terms (names, products, jargon — not everyday English). Fed into cleanup as spelling reference. Stored at `~/Library/Application Support/com.freeze.quill/vocabulary.json`. Learn while dictating, or **Add term…** / remove from the menu. No history seeding. |
+
+### Typical layout (example)
+
+- Gesture: **Hold to talk**
+- Simple dictation: **Hold Control ⌃** → insert as spoken  
+- Cleaned dictation: **Hold 🌐** (or Right ⌥, etc.) → clean with Grok → insert  
+
+### Build this fork from source
+
+```sh
+git clone https://github.com/diliprt/quill.git && cd quill
+./signing/install-identity.sh   # once per machine
+./build.sh                      # installs to ~/Applications/Quill.app
+open -a Quill
+```
+
+### Tracking upstream
+
+```sh
+git remote add upstream https://github.com/xfreeze2/quill.git   # if missing
+git fetch upstream
+git merge upstream/main    # or: git rebase upstream/main
+./build.sh
+git push origin main
+```
+
+Everything below is the original upstream documentation (still accurate for core dictation, install, privacy, and build).
+
+---
+
 ## Install
+
+Upstream one-liner (stock Quill, without this fork's extras):
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/xfreeze2/quill/main/install.sh | bash
@@ -29,9 +76,12 @@ xattr -dr com.apple.quarantine ~/Applications/Quill.app && open ~/Applications/Q
 That last step is needed because Quill isn't notarised by Apple — macOS quarantines anything
 downloaded from the internet. See [Why the quarantine step](#why-the-quarantine-step).
 
+**This fork:** build from source (above) so you get hold-to-talk, cleanup, and the dictionary.
+
 ## Use it
 
 1. **Tap `Control`** — a panel appears in the corner and starts listening.
+   *(In this fork you can switch to **Hold to talk**, and optionally a second smart key for cleanup.)*
 2. **Talk.** The transcript streams in live as you speak.
 3. **Finish, any way you like — or just stop talking:**
    - **say nothing for 3 seconds** — it finishes on its own and pastes. Adjustable, or off
@@ -39,6 +89,7 @@ downloaded from the internet. See [Why the quarantine step](#why-the-quarantine-
    - **click wherever you want the words** — the click both stops it and chooses the destination
    - **tap `Control` again** — lands them where your cursor already is
    - **press `Escape`** — throws the whole thing away and pastes nothing
+   - **(fork)** if using hold-to-talk: **release the key** to stop and insert
 
 **Replacing text:** highlight something first, then dictate — what you say replaces the
 selection instead of being appended. The highlight is captured the moment you press the trigger,

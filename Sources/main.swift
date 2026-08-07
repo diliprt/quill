@@ -890,6 +890,12 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         client.onComplete = { [weak self] text in self?.finishSession(with: text) }
         client.onFailure = { [weak self] failure in self?.abortSession(message: failure.message) }
 
+        // Upstream 0.6.0 idea: warm the cleanup TLS path while they still speak
+        // (cold ~1.9s vs warm ~0.9s). Only for the smart / cleaned lane.
+        if sessionUsesCleanup {
+            Cleaner.warm(token: creds.token)
+        }
+
         client.connect(token: creds.token,
                        language: UserDefaults.standard.string(forKey: Defaults.language) ?? "en")
 

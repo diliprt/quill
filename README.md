@@ -5,7 +5,7 @@
 > **This repository** ([diliprt/quill](https://github.com/diliprt/quill)) is a public fork of
 > [xfreeze2/quill](https://github.com/xfreeze2/quill). Upstream behaviour is preserved; this
 > fork adds hold-to-talk, dual-key Grok cleanup, and a local personal dictionary.
-> Current fork build: **0.5.5**.
+> Current fork build: **0.6.1** (tracks upstream [v0.6.0](https://github.com/xfreeze2/quill/releases/tag/v0.6.0) ideas; keeps dual-key cleanup + dictionary).
 
 Tap a key, talk, then click into whatever window you want the words in. They appear there — at
 the end of what's already written, without touching your clipboard.
@@ -23,7 +23,7 @@ Additions on top of upstream (menu-bar right-click → settings):
 |--------|----------------|
 | **Hold to talk** | Push-to-talk: press and hold the trigger to listen, release to stop and insert. Also still supports single-tap / double-tap toggle. |
 | **Dual triggers** | **Simple key** — raw speech-to-text only. **Smart key** — STT, then a fast Grok cleanup pass (grammar, filler, punctuation), then insert. Keys are chosen independently so you can keep both modes. |
-| **Clean up with Grok** | Toggle + smart-key picker. Uses the same Grok Build session as STT (`~/.grok/auth.json`). Cleanup prompt follows FreeFlow / MacWhisper / Superwhisper patterns: not-an-assistant, self-corrections, filler removal, spoken punctuation, dictionary as spelling-only. On failure, pastes raw transcript. |
+| **Clean up with Grok** | Toggle + smart-key picker. STT → Grok cleanup → insert. Prompt uses OpenWhispr-style `<transcript>` wrapping + FreeFlow/Superwhisper rules. Imports upstream **0.6.0** safety: connection warm-up while speaking, and reject rewrites that don’t still look like your words (≥~65–70% word overlap) — then paste raw. |
 | **Personal dictionary** | Local-only library of *unique* terms (names, products, jargon — not everyday English). Fed into cleanup as spelling reference. Stored at `~/Library/Application Support/com.freeze.quill/vocabulary.json`. Learn while dictating, or **Add term…** / remove from the menu. No history seeding. |
 
 ### Typical layout (example)
@@ -50,6 +50,12 @@ git merge upstream/main    # or: git rebase upstream/main
 ./build.sh
 git push origin main
 ```
+
+### vs upstream v0.6.0
+
+Upstream [v0.6.0](https://github.com/xfreeze2/quill/releases/tag/v0.6.0) added optional **Clean up grammar** (`Polish.swift`) on every dictation when toggled (off by default), with warm-up and a “must resemble original” guard.
+
+This fork already had a stronger cleanup lane (separate **smart key**, OpenWhispr/FreeFlow-style prompt, personal dictionary). **0.6.1** absorbed upstream’s warm-up + resemble safety into our `Cleaner` path rather than shipping a second parallel polisher. Dual keys and the local dictionary remain fork-only.
 
 Everything below is the original upstream documentation (still accurate for core dictation, install, privacy, and build).
 

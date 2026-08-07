@@ -1,6 +1,15 @@
 import Cocoa
 import QuartzCore
 
+/// Which dictation path a trigger starts.
+///
+/// - `raw`: speech-to-text only, insert as spoken
+/// - `smart`: speech-to-text then Grok cleanup, then insert
+enum DictationLane: String {
+    case raw
+    case smart
+}
+
 /// The global trigger. Bare modifier taps are used deliberately: a modifier
 /// pressed on its own means nothing to macOS or to any app, so a double-tap can
 /// never shadow a shortcut in whatever you are typing into — including Grok
@@ -22,10 +31,21 @@ enum Trigger: String, CaseIterable {
         }
     }
 
-    /// How to describe the gesture, given the single/double setting.
+    /// How to describe the gesture, given the single/double/hold setting.
+    func gesture(mode: GestureMode) -> String {
+        switch mode {
+        case .hold:
+            return self == .f5 ? "Hold F5" : "Hold " + title
+        case .single:
+            return self == .f5 ? "Press F5" : "Tap " + title
+        case .double:
+            return self == .f5 ? "Press F5" : "Double-tap " + title
+        }
+    }
+
+    /// Back-compat wrapper for call sites that still pass the old bool.
     func gesture(singleTap: Bool) -> String {
-        guard self != .f5 else { return "Press F5" }
-        return (singleTap ? "Tap " : "Double-tap ") + title
+        gesture(mode: singleTap ? .single : .double)
     }
 
     var shortTitle: String {
@@ -50,9 +70,82 @@ enum Trigger: String, CaseIterable {
         case .f5:           return nil
         }
     }
+
+    /// A different key suitable when this one is already claimed.
+    func alternate(excluding other: Trigger?) -> Trigger {
+        for candidate in Trigger.allCases where candidate != self && candidate != other {
+            return candidate
+        }
+        return self == .control ? .rightOption : .control
+    }
 }
 
-/// Watches the whole system for the trigger, and for the click that ends a
+/// How the trigger key is used: tap to toggle, double-tap to toggle, or hold
+/// (push-to-talk) — press starts, release stops and inserts.
+enum GestureMode: String, CaseIterable {
+    case single
+    case double
+    case hold
+
+    var menuTitle: String {
+        switch self {
+        case .single: return "Single tap (toggle)"
+        case .double: return "Double tap (toggle)"
+        case .hold:   return "Hold to talk"
+        }
+    }
+
+    var toolTip: String {
+        switch self {
+        case .single:
+            return "A tap only counts if nothing else is pressed while the key is held, "
+                + "so ⌃C and friends never trigger it."
+        case .double:
+            return "Two quick taps of the trigger key start or stop dictation."
+        case .hold:
+            return "Press and hold to talk; release to stop and insert the text. "
+                + "Chords like ⌃C never start a session."
+        }
+    }
+}
+
+/// Per-key gesture state (primary raw key and optional smart-cleanup key).
+private final class TriggerBinding {
+    let lane: DictationLane
+    var trigger: Trigger
+
+    var lastTapAt: CFTimeInterval = 0
+    var sawKeyDownSinceTap = false
+    var pressedAt: CFTimeInterval = 0
+    var activityAtPress: UInt64 = 0
+    var holdArmed = false
+    var holdActive = false
+    var holdStartWork: DispatchWorkItem?
+    var f5HoldDown = false
+
+    init(lane: DictationLane, trigger: Trigger) {
+        self.lane = lane
+        self.trigger = trigger
+    }
+
+    func resetHold() {
+        holdStartWork?.cancel()
+        holdStartWork = nil
+        holdArmed = false
+        holdActive = false
+        f5HoldDown = false
+        pressedAt = 0
+    }
+
+    func cancelHoldArm() {
+        holdStartWork?.cancel()
+        holdStartWork = nil
+        holdArmed = false
+        pressedAt = 0
+    }
+}
+
+/// Watches the whole system for the trigger(s), and for the click that ends a
 /// recording.
 ///
 /// This is an ACTIVE tap that returns events untouched, not a listen-only one.
@@ -65,32 +158,44 @@ final class DoubleTapRightCommand {
     private let window: CFTimeInterval = 0.42
     private static let f5KeyCode: Int64 = 96
     private static let modifierKeyCodes: Set<Int64> = [54, 55, 56, 57, 58, 59, 60, 61, 62, 63]
+    private let holdStartDelay: CFTimeInterval = 0.12
+    private let tapMaxHold: CFTimeInterval = 0.35
 
     private var tap: CFMachPort?
-    private var lastTapAt: CFTimeInterval = 0
-    private var sawKeyDownSinceTap = false
     private var loggedFirstEvent = false
 
-    var trigger: Trigger = .rightCommand
+    private let raw = TriggerBinding(lane: .raw, trigger: .control)
+    private var smart: TriggerBinding?
 
-    /// Fire on a single quick tap rather than a double-tap. Safe because a tap is
-    /// only counted when the key goes down and back up with no other key pressed
-    /// in between and inside `tapMaxHold` — so ⌃C, ⌃E and friends never trigger it.
+    /// Primary (simple dictation) key.
+    var trigger: Trigger {
+        get { raw.trigger }
+        set { raw.trigger = newValue }
+    }
+
+    /// Optional second key for smart (Grok-cleaned) dictation. Nil disables it.
+    var smartTrigger: Trigger? {
+        get { smart?.trigger }
+        set {
+            if let value = newValue {
+                if smart == nil {
+                    smart = TriggerBinding(lane: .smart, trigger: value)
+                } else {
+                    smart?.trigger = value
+                }
+            } else {
+                smart?.resetHold()
+                smart = nil
+            }
+        }
+    }
+
+    /// Fire on a single quick tap rather than a double-tap.
     var singleTap = false
-    private let tapMaxHold: CFTimeInterval = 0.35
-    private var pressedAt: CFTimeInterval = 0
-    private var activityAtPress: UInt64 = 0
 
-    /// Total input activity the system has seen. Sampling this at press and at
-    /// release tells us whether ANYTHING was done while the modifier was held —
-    /// i.e. whether this was a chord — WITHOUT needing to observe the events
-    /// themselves. Unlike reading key events, these counters are not
-    /// permission-gated, which is what lets single-tap work without Input
-    /// Monitoring.
-    ///
-    /// Clicks and scrolls are counted too: ⌃-click is the right-click gesture and
-    /// ⌃-scroll is screen zoom. Neither moves a key counter, and both would
-    /// otherwise look exactly like a bare tap.
+    /// Push-to-talk: key down starts recording, key up stops and inserts.
+    var holdToTalk = false
+
     private static let watchedActivity: [CGEventType] = [
         .keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown, .scrollWheel,
     ]
@@ -103,33 +208,40 @@ final class DoubleTapRightCommand {
         }
         return total
     }
-    /// Off unless QUILL_DEBUG_KEYS is set — this would otherwise leave a keystroke
-    /// trail on disk, which a dictation tool has no business doing.
+
     private let debugKeys = ProcessInfo.processInfo.environment["QUILL_DEBUG_KEYS"] != nil
         || UserDefaults.standard.bool(forKey: "debugKeys")
-    var onTrigger: () -> Void = {}
+
+    var onTrigger: (DictationLane) -> Void = { _ in }
+    var onHoldStart: (DictationLane) -> Void = { _ in }
+    var onHoldEnd: (DictationLane) -> Void = { _ in }
     var onFirstEvent: () -> Void = {}
 
-    /// A click anywhere on screen, in CoreGraphics global coordinates. Only
-    /// delivered while `watchClicks` is set — that is what lets a recording stop
-    /// itself the moment you click where the text should go.
     var onClickAnywhere: (CGPoint) -> Void = { _ in }
     var watchClicks = false
-
-    /// Escape pressed during a recording — the user wants this thrown away.
     var onCancel: () -> Void = {}
 
     private static let escapeKeyCode: Int64 = 53
     private var cancelTimer: Timer?
     private var escapeWasDown = false
 
-    /// Escape is watched two ways, because either can be unavailable.
-    ///
-    /// The event tap only receives key presses when Input Monitoring has been
-    /// granted, which Quill deliberately does not require. `CGEventSource.keyState`
-    /// asks the hardware whether a key is down and is not gated behind that
-    /// permission, so polling it covers the common case. Whichever notices first
-    /// wins; a flag stops the cancel firing twice.
+    /// True while any hold-to-talk session is live.
+    var isHolding: Bool {
+        raw.holdActive || (smart?.holdActive == true)
+    }
+
+    /// Which lane is currently holding, if any.
+    var activeHoldLane: DictationLane? {
+        if raw.holdActive { return .raw }
+        if smart?.holdActive == true { return .smart }
+        return nil
+    }
+
+    private var bindings: [TriggerBinding] {
+        if let smart { return [raw, smart] }
+        return [raw]
+    }
+
     func watchForCancel(_ on: Bool) {
         cancelTimer?.invalidate()
         cancelTimer = nil
@@ -154,6 +266,7 @@ final class DoubleTapRightCommand {
 
         let mask = CGEventMask(1 << CGEventType.flagsChanged.rawValue)
                  | CGEventMask(1 << CGEventType.keyDown.rawValue)
+                 | CGEventMask(1 << CGEventType.keyUp.rawValue)
                  | CGEventMask(1 << CGEventType.leftMouseDown.rawValue)
 
         let refcon = Unmanaged.passUnretained(self).toOpaque()
@@ -183,10 +296,87 @@ final class DoubleTapRightCommand {
 
     func stop() {
         loggedFirstEvent = false
+        for b in bindings { b.resetHold() }
         guard let port = tap else { return }
         CGEvent.tapEnable(tap: port, enable: false)
         CFMachPortInvalidate(port)
         tap = nil
+    }
+
+    func resetHoldState() {
+        for b in bindings { b.resetHold() }
+    }
+
+    private func binding(matching code: Int64, flagCheck flags: CGEventFlags? = nil) -> TriggerBinding? {
+        for b in bindings {
+            if b.trigger == .f5, code == Self.f5KeyCode { return b }
+            if let spec = b.trigger.modifier, spec.keyCodes.contains(code) {
+                if let flags, !flags.contains(spec.flag), flags.intersection(spec.flag).isEmpty {
+                    // On release, flag may already be gone — still match by keycode.
+                }
+                return b
+            }
+        }
+        return nil
+    }
+
+    private func bindingForF5() -> TriggerBinding? {
+        bindings.first { $0.trigger == .f5 }
+    }
+
+    private func triggerKeyIsDown(_ binding: TriggerBinding) -> Bool {
+        if binding.trigger == .f5 {
+            return CGEventSource.keyState(.combinedSessionState, key: CGKeyCode(Self.f5KeyCode))
+        }
+        guard let spec = binding.trigger.modifier else { return false }
+        if CGEventSource.flagsState(.combinedSessionState).contains(spec.flag) {
+            return true
+        }
+        for code in spec.keyCodes {
+            if CGEventSource.keyState(.combinedSessionState, key: CGKeyCode(code)) {
+                return true
+            }
+        }
+        return false
+    }
+
+    private func armHoldStart(_ binding: TriggerBinding) {
+        binding.cancelHoldArm()
+        binding.holdArmed = true
+        binding.pressedAt = CACurrentMediaTime()
+        binding.activityAtPress = Self.activityCounter()
+        binding.sawKeyDownSinceTap = false
+
+        let work = DispatchWorkItem { [weak self, weak binding] in
+            guard let self, let binding, binding.holdArmed, self.holdToTalk else { return }
+            let activityNow = Self.activityCounter()
+            if activityNow != binding.activityAtPress || binding.sawKeyDownSinceTap {
+                if self.debugKeys {
+                    Log.write("    [keys] hold arm aborted (\(binding.lane.rawValue)) — chord/activity")
+                }
+                binding.cancelHoldArm()
+                return
+            }
+            guard self.triggerKeyIsDown(binding) else {
+                binding.cancelHoldArm()
+                return
+            }
+            binding.holdArmed = false
+            binding.holdActive = true
+            if self.debugKeys { Log.write("    [keys] hold START \(binding.lane.rawValue)") }
+            self.onHoldStart(binding.lane)
+        }
+        binding.holdStartWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + holdStartDelay, execute: work)
+    }
+
+    private func finishHoldIfActive(_ binding: TriggerBinding) {
+        binding.cancelHoldArm()
+        guard binding.holdActive else { return }
+        binding.holdActive = false
+        if debugKeys { Log.write("    [keys] hold END \(binding.lane.rawValue)") }
+        let lane = binding.lane
+        DispatchQueue.main.async { [weak self] in self?.onHoldEnd(lane) }
     }
 
     /// Returns true to swallow the event.
@@ -196,24 +386,32 @@ final class DoubleTapRightCommand {
             DispatchQueue.main.async { [weak self] in self?.onFirstEvent() }
         }
 
-        // macOS disables a tap that is slow or gets interrupted; re-arm it.
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
             if let port = tap { CGEvent.tapEnable(tap: port, enable: true) }
             return false
         }
 
         if type == .leftMouseDown {
+            for b in bindings where b.holdArmed { b.cancelHoldArm() }
             guard watchClicks else { return false }
             let location = event.location
             DispatchQueue.main.async { [weak self] in self?.onClickAnywhere(location) }
             return false
         }
 
+        if type == .keyUp {
+            let code = event.getIntegerValueField(.keyboardEventKeycode)
+            if holdToTalk, let b = bindingForF5(), code == Self.f5KeyCode, b.f5HoldDown {
+                b.f5HoldDown = false
+                finishHoldIfActive(b)
+                return true
+            }
+            return false
+        }
+
         if type == .keyDown {
             let code = event.getIntegerValueField(.keyboardEventKeycode)
 
-            // Only meaningful when Input Monitoring happens to be granted; the
-            // keyState poll above covers everyone else.
             if code == Self.escapeKeyCode, cancelTimer != nil, !escapeWasDown {
                 escapeWasDown = true
                 DispatchQueue.main.async { [weak self] in self?.onCancel() }
@@ -223,68 +421,94 @@ final class DoubleTapRightCommand {
                 .intersection([.maskCommand, .maskControl, .maskAlternate, .maskShift])
                 .isEmpty
 
-            if trigger == .f5, code == Self.f5KeyCode, bareKey {
-                DispatchQueue.main.async { [weak self] in self?.onTrigger() }
-                // Swallowed so macOS dictation does not also fire on the same press.
+            if let b = bindingForF5(), code == Self.f5KeyCode, bareKey {
+                if holdToTalk {
+                    if b.f5HoldDown || b.holdActive || b.holdArmed { return true }
+                    b.f5HoldDown = true
+                    armHoldStart(b)
+                    return true
+                }
+                let lane = b.lane
+                DispatchQueue.main.async { [weak self] in self?.onTrigger(lane) }
                 return true
             }
 
-            // A real keystroke means the modifier press was part of a shortcut
-            // (⌘C, ⌥→ …), not a bare tap. Invalidate.
-            if debugKeys { Log.write("    [keys] keyDown code=\(code) → invalidating tap") }
-            sawKeyDownSinceTap = true
-            lastTapAt = 0
-            return false
-        }
-
-        guard type == .flagsChanged, let spec = trigger.modifier else { return false }
-
-        let code = event.getIntegerValueField(.keyboardEventKeycode)
-        guard spec.keyCodes.contains(code) else {
-            // A different modifier joined in — this is a chord, not a tap.
-            if Self.modifierKeyCodes.contains(code), !event.flags.isEmpty {
-                lastTapAt = 0
-                pressedAt = 0
+            if debugKeys { Log.write("    [keys] keyDown code=\(code) → invalidating taps") }
+            for b in bindings {
+                b.sawKeyDownSinceTap = true
+                b.lastTapAt = 0
+                if b.holdArmed { b.cancelHoldArm() }
             }
             return false
         }
 
+        guard type == .flagsChanged else { return false }
+
+        let code = event.getIntegerValueField(.keyboardEventKeycode)
+        let flags = event.flags
+
+        // Find a binding that owns this keycode.
+        guard let binding = bindings.first(where: { b in
+            guard let spec = b.trigger.modifier else { return false }
+            return spec.keyCodes.contains(code)
+        }) else {
+            // Foreign modifier — chord for any armed binding.
+            if Self.modifierKeyCodes.contains(code), !flags.isEmpty {
+                for b in bindings {
+                    b.lastTapAt = 0
+                    b.pressedAt = 0
+                    if b.holdArmed { b.cancelHoldArm() }
+                }
+            }
+            return false
+        }
+
+        guard let spec = binding.trigger.modifier else { return false }
         let now = CACurrentMediaTime()
-        let isDown = event.flags.contains(spec.flag)
+        let isDown = flags.contains(spec.flag)
 
         if debugKeys {
-            Log.write("    [keys] trigger-mod \(isDown ? "DOWN" : "UP") code=\(code) sawKeyDown=\(sawKeyDownSinceTap) held=\(String(format: "%.2f", now - pressedAt))")
+            Log.write("    [keys] \(binding.lane.rawValue) \(isDown ? "DOWN" : "UP") "
+                + "code=\(code) hold=\(holdToTalk)")
         }
 
         if isDown {
+            if holdToTalk {
+                if binding.holdActive || binding.holdArmed { return false }
+                armHoldStart(binding)
+                return false
+            }
             if singleTap {
-                pressedAt = now
-                activityAtPress = Self.activityCounter()
-                sawKeyDownSinceTap = false
-            } else if now - lastTapAt < window && !sawKeyDownSinceTap {
-                lastTapAt = 0
-                sawKeyDownSinceTap = false
-                DispatchQueue.main.async { [weak self] in self?.onTrigger() }
+                binding.pressedAt = now
+                binding.activityAtPress = Self.activityCounter()
+                binding.sawKeyDownSinceTap = false
+            } else if now - binding.lastTapAt < window && !binding.sawKeyDownSinceTap {
+                binding.lastTapAt = 0
+                binding.sawKeyDownSinceTap = false
+                let lane = binding.lane
+                DispatchQueue.main.async { [weak self] in self?.onTrigger(lane) }
             } else {
-                lastTapAt = now
-                sawKeyDownSinceTap = false
+                binding.lastTapAt = now
+                binding.sawKeyDownSinceTap = false
             }
             return false
         }
 
-        // Release. A single tap only counts if NOTHING was struck while the key was
-        // held, and it was held briefly — a chord or a long hold is not a tap.
-        let activityNow = Self.activityCounter()
-        let didSomethingElse = activityNow != activityAtPress
-
-        if debugKeys {
-            Log.write("    [keys] release: usedAsChord=\(didSomethingElse) "
-                + "activity \(activityAtPress)→\(activityNow) held=\(String(format: "%.2f", now - pressedAt))")
+        // Release.
+        if holdToTalk {
+            finishHoldIfActive(binding)
+            binding.cancelHoldArm()
+            return false
         }
 
-        if singleTap, pressedAt > 0, !sawKeyDownSinceTap, !didSomethingElse, now - pressedAt < tapMaxHold {
-            pressedAt = 0
-            DispatchQueue.main.async { [weak self] in self?.onTrigger() }
+        let activityNow = Self.activityCounter()
+        let didSomethingElse = activityNow != binding.activityAtPress
+
+        if singleTap, binding.pressedAt > 0, !binding.sawKeyDownSinceTap,
+           !didSomethingElse, now - binding.pressedAt < tapMaxHold {
+            binding.pressedAt = 0
+            let lane = binding.lane
+            DispatchQueue.main.async { [weak self] in self?.onTrigger(lane) }
         }
         return false
     }

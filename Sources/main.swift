@@ -18,9 +18,16 @@ enum Defaults {
     static let clickToInsert = "clickToInsert"
     static let trigger = "trigger"
     static let singleTap = "singleTap"
+    static let gestureMode = "gestureMode"
     static let didShowSetup = "didShowSetup"
     static let stopPhrase = "stopPhrase"
     static let pauseSeconds = "pauseSeconds"
+    /// Master switch: enables the smart (Grok cleanup) trigger key.
+    static let cleanupEnabled = "cleanupEnabled"
+    /// Key used for smart dictation (must differ from `trigger`).
+    static let cleanupTrigger = "cleanupTrigger"
+    /// Learn unique personal terms into the local vocabulary file.
+    static let vocabLearning = "vocabLearning"
 
     static func register() {
         UserDefaults.standard.register(defaults: [
@@ -30,8 +37,13 @@ enum Defaults {
             clickToInsert: true,
             trigger: Trigger.control.rawValue,
             singleTap: true,
+            // Default stays single-tap; hold is opt-in via the Trigger menu.
+            gestureMode: GestureMode.single.rawValue,
             stopPhrase: true,
             pauseSeconds: 3.0,
+            cleanupEnabled: false,
+            cleanupTrigger: Trigger.rightOption.rawValue,
+            vocabLearning: true,
         ])
     }
 
@@ -45,6 +57,48 @@ enum Defaults {
     static var currentTrigger: Trigger {
         Trigger(rawValue: UserDefaults.standard.string(forKey: trigger) ?? "") ?? .rightCommand
     }
+
+    static var smartTrigger: Trigger {
+        let primary = currentTrigger
+        let raw = UserDefaults.standard.string(forKey: cleanupTrigger) ?? ""
+        let candidate = Trigger(rawValue: raw) ?? .rightOption
+        // Never share a key with simple dictation.
+        return candidate == primary ? primary.alternate(excluding: nil) : candidate
+    }
+
+    static var cleanupIsOn: Bool { bool(cleanupEnabled) }
+
+    /// Prefer `gestureMode`; fall back to the older `singleTap` bool for installs
+    /// that never wrote the new key.
+    static var currentGesture: GestureMode {
+        if let raw = UserDefaults.standard.string(forKey: gestureMode),
+           let mode = GestureMode(rawValue: raw) {
+            return mode
+        }
+        return bool(singleTap) ? .single : .double
+    }
+
+    static func setGesture(_ mode: GestureMode) {
+        UserDefaults.standard.set(mode.rawValue, forKey: gestureMode)
+        // Keep the legacy flag in sync so older log lines / code paths stay honest.
+        UserDefaults.standard.set(mode == .single, forKey: singleTap)
+    }
+
+    static func setPrimaryTrigger(_ option: Trigger) {
+        UserDefaults.standard.set(option.rawValue, forKey: trigger)
+        // If smart key collided, move it.
+        if cleanupIsOn, smartTrigger == option {
+            let alt = option.alternate(excluding: option)
+            UserDefaults.standard.set(alt.rawValue, forKey: cleanupTrigger)
+        }
+    }
+
+    static func setSmartTrigger(_ option: Trigger) {
+        let primary = currentTrigger
+        let chosen = option == primary ? option.alternate(excluding: primary) : option
+        UserDefaults.standard.set(chosen.rawValue, forKey: cleanupTrigger)
+    }
+
     static func flip(_ key: String) { UserDefaults.standard.set(!bool(key), forKey: key) }
 }
 
@@ -56,6 +110,7 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         case hotkey     // trigger key or the pill — focus has not moved
         case click      // you clicked into the target — give focus a beat to settle
         case voice      // you said "that's it" — focus has not moved either
+        case hold       // push-to-talk release — focus has not moved
     }
 
     private let hotkey = DoubleTapRightCommand()
@@ -65,6 +120,10 @@ final class QuillApp: NSObject, NSApplicationDelegate {
 
     private var statusItem: NSStatusItem!
     private var isRecording = false
+    /// True when this recording was started by hold-to-talk (release will stop it).
+    private var sessionFromHold = false
+    /// This session should run Grok cleanup after STT (smart key).
+    private var sessionUsesCleanup = false
     private var pendingPCM: [Data] = []
     private var socketReady = false
     private var sawAnyText = false
@@ -123,22 +182,27 @@ final class QuillApp: NSObject, NSApplicationDelegate {
                 self.setup.show()
                 return
             }
-            self.toggle()
+            self.toggle(lane: .raw)
         }
         hud.showsIdlePill = Defaults.bool(Defaults.cornerButton)
         hud.install()
 
-        hotkey.trigger = Defaults.currentTrigger
-        applyTapMode()
-        hotkey.onTrigger = { [weak self] in self?.toggle() }
+        applyTriggersAndGesture()
+        hotkey.onTrigger = { [weak self] lane in self?.toggle(lane: lane) }
+        hotkey.onHoldStart = { [weak self] lane in self?.startHoldSession(lane: lane) }
+        hotkey.onHoldEnd = { [weak self] lane in self?.endHoldSession(lane: lane) }
         hotkey.onClickAnywhere = { [weak self] point in self?.handleClickAnywhere(at: point) }
         hotkey.onCancel = { [weak self] in self?.cancelSession() }
 
         isTrusted = Inserter.isTrusted
         let inputMonitoring = IOHIDCheckAccess(kIOHIDRequestTypeListenEvent)
+        let smartNote = Defaults.cleanupIsOn
+            ? " smart=\(Defaults.smartTrigger.gesture(mode: Defaults.currentGesture))"
+            : ""
         Log.write("launch — Quill \(Build.version) — AXIsProcessTrusted=\(isTrusted) inputMonitoring=\(inputMonitoring.rawValue) "
-            + "trigger=\(Defaults.currentTrigger.gesture(singleTap: Defaults.bool(Defaults.singleTap))) "
-            + "bundle=\(Bundle.main.bundlePath)")
+            + "trigger=\(Defaults.currentTrigger.gesture(mode: Defaults.currentGesture))"
+            + smartNote
+            + " bundle=\(Bundle.main.bundlePath)")
 
         hotkey.onFirstEvent = { Log.write("event tap is LIVE — first event delivered") }
         hotkey.start()
@@ -156,7 +220,7 @@ final class QuillApp: NSObject, NSApplicationDelegate {
 
         trustTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
             guard let self else { return }
-            self.applyTapMode()
+            self.applyTriggersAndGesture()
             let now = Inserter.isTrusted
             guard now != self.isTrusted else { return }
             self.isTrusted = now
@@ -165,14 +229,14 @@ final class QuillApp: NSObject, NSApplicationDelegate {
             self.hotkey.stop()
             self.hotkey.start()
             if now {
-                self.hud.apply(.notice("Accessibility granted — \(Defaults.currentTrigger.gesture(singleTap: self.hotkey.singleTap)) is live"))
+                self.hud.apply(.notice("Accessibility granted — \(Defaults.currentTrigger.gesture(mode: Defaults.currentGesture)) is live"))
                 self.hud.collapse(after: 2.5)
             }
         }
         refreshIcon()
 
         if selfTestPath != nil {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in self?.toggle() }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in self?.toggle(lane: .raw) }
         } else {
             let firstRun = !Defaults.bool(Defaults.didShowSetup)
             let missingSomething = !Inserter.isTrusted || Auth.load() == nil
@@ -186,31 +250,30 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// Single-tap needs Input Monitoring, and it is not optional.
-    ///
-    /// Without it the event tap receives modifier changes but NOT key presses, so
-    /// there is no way to tell a bare ⌃ tap from ⌃C — and dictation would fire on
-    /// every shortcut you press in a terminal. Measured, not assumed. Until it is
-    /// granted, single-tap silently degrades to double-tap rather than misfiring.
     private var inputMonitoringGranted: Bool {
         IOHIDCheckAccess(kIOHIDRequestTypeListenEvent) == kIOHIDAccessTypeGranted
     }
 
-    private var loggedTapMode: Bool?
+    private var loggedGestureMode: GestureMode?
+    private var loggedSmartKey: String?
 
-    private func applyTapMode() {
-        let wanted = Defaults.bool(Defaults.singleTap)
-        // Chords are now detected from the system's key-press counters, which are
-        // not permission-gated, so single tap no longer depends on Input Monitoring.
-        let safe = wanted
-        hotkey.singleTap = safe
-        guard loggedTapMode != safe else { return }      // only on change, not every tick
-        loggedTapMode = safe
-        if wanted && !safe {
-            Log.write("single-tap requested but Input Monitoring denied — using double-tap")
-        } else if safe {
-            Log.write("single tap is live")
+    private func applyTriggersAndGesture() {
+        let mode = Defaults.currentGesture
+        hotkey.holdToTalk = (mode == .hold)
+        hotkey.singleTap = (mode == .single)
+        hotkey.trigger = Defaults.currentTrigger
+        hotkey.smartTrigger = Defaults.cleanupIsOn ? Defaults.smartTrigger : nil
+
+        let smartKey = Defaults.cleanupIsOn ? Defaults.smartTrigger.rawValue : "off"
+        let changed = loggedGestureMode != mode || loggedSmartKey != smartKey
+        guard changed else { return }
+        loggedGestureMode = mode
+        loggedSmartKey = smartKey
+        var line = "gesture mode: \(mode.rawValue) — raw \(Defaults.currentTrigger.gesture(mode: mode))"
+        if Defaults.cleanupIsOn {
+            line += " · smart \(Defaults.smartTrigger.gesture(mode: mode))"
         }
+        Log.write(line)
     }
 
     private func requestInputMonitoring() {
@@ -229,13 +292,17 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         button.target = self
         button.action = #selector(statusItemClicked)
         button.sendAction(on: [.leftMouseUp, .rightMouseUp])
-        button.toolTip = "Quill — double-tap right ⌘ to dictate"
+        var tip = "Quill — \(Defaults.currentTrigger.gesture(mode: Defaults.currentGesture)) for simple dictation"
+        if Defaults.cleanupIsOn {
+            tip += " · \(Defaults.smartTrigger.gesture(mode: Defaults.currentGesture)) for cleaned"
+        }
+        button.toolTip = tip
     }
 
     @objc private func statusItemClicked() {
         let rightClick = NSApp.currentEvent?.type == .rightMouseUp
             || NSApp.currentEvent?.modifierFlags.contains(.control) == true
-        rightClick ? showMenu() : toggle()
+        rightClick ? showMenu() : toggle(lane: .raw)
     }
 
     private func refreshIcon() {
@@ -263,14 +330,21 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         menu.addItem(.separator())
 
         let toggleItem = NSMenuItem(title: isRecording ? "Stop dictation" : "Start dictation",
-                                    action: #selector(toggle), keyEquivalent: "")
+                                    action: #selector(menuToggleRaw), keyEquivalent: "")
         toggleItem.target = self
         menu.addItem(toggleItem)
 
-        let hint = NSMenuItem(title: "\(Defaults.currentTrigger.gesture(singleTap: Defaults.bool(Defaults.singleTap))) anywhere",
+        let hint = NSMenuItem(title: "Simple: \(Defaults.currentTrigger.gesture(mode: Defaults.currentGesture))",
                               action: nil, keyEquivalent: "")
         hint.isEnabled = false
         menu.addItem(hint)
+        if Defaults.cleanupIsOn {
+            let smartHint = NSMenuItem(
+                title: "Cleaned: \(Defaults.smartTrigger.gesture(mode: Defaults.currentGesture))",
+                action: nil, keyEquivalent: "")
+            smartHint.isEnabled = false
+            menu.addItem(smartHint)
+        }
         menu.addItem(.separator())
 
         let history = UserDefaults.standard.stringArray(forKey: Defaults.history) ?? []
@@ -295,6 +369,94 @@ final class QuillApp: NSObject, NSApplicationDelegate {
                   action: #selector(toggleInsertAtEnd))
         addToggle(to: menu, title: "Stop when I say \u{201C}that\u{2019}s it\u{201D} or \u{201C}that\u{2019}s all\u{201D}", key: Defaults.stopPhrase,
                   action: #selector(toggleStopPhrase))
+
+        // Grok cleanup — separate key from simple dictation.
+        let cleanupMenu = NSMenu()
+        cleanupMenu.autoenablesItems = false
+        addToggle(to: cleanupMenu, title: "Enable cleaned dictation key",
+                  key: Defaults.cleanupEnabled, action: #selector(toggleCleanup))
+        cleanupMenu.addItem(.separator())
+        let smartKeyHeader = NSMenuItem(title: "Smart key (Grok cleanup)", action: nil, keyEquivalent: "")
+        smartKeyHeader.isEnabled = false
+        cleanupMenu.addItem(smartKeyHeader)
+        let activeSmart = Defaults.smartTrigger
+        let primary = Defaults.currentTrigger
+        for option in Trigger.allCases {
+            let item = NSMenuItem(title: option.title,
+                                  action: #selector(setSmartTrigger(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = option.rawValue
+            item.state = (option == activeSmart) ? .on : .off
+            item.isEnabled = Defaults.cleanupIsOn && option != primary
+            if option == primary {
+                item.toolTip = "Already used for simple dictation — pick another key."
+            } else {
+                item.toolTip = "Hold/tap this key for STT + Grok cleanup."
+            }
+            cleanupMenu.addItem(item)
+        }
+        let cleanupItem = NSMenuItem(title: "Clean up with Grok", action: nil, keyEquivalent: "")
+        menu.addItem(cleanupItem)
+        menu.setSubmenu(cleanupMenu, for: cleanupItem)
+
+        // Personal dictionary — unique terms only, local JSON on this Mac.
+        let vocabMenu = NSMenu()
+        vocabMenu.autoenablesItems = false
+        let learnItem = NSMenuItem(title: "Learn unique terms while I dictate",
+                                   action: #selector(toggleVocabLearning), keyEquivalent: "")
+        learnItem.target = self
+        learnItem.state = Vocabulary.learningEnabled ? .on : .off
+        learnItem.toolTip = "Stores names, products, and jargon you use — not everyday English. "
+            + "Cleanup uses this list to keep spellings consistent."
+        vocabMenu.addItem(learnItem)
+
+        let addItem = NSMenuItem(title: "Add term…", action: #selector(addVocabTerm), keyEquivalent: "")
+        addItem.target = self
+        vocabMenu.addItem(addItem)
+
+        let entries = Vocabulary.listed(limit: 24)
+        if !entries.isEmpty {
+            vocabMenu.addItem(.separator())
+            let header = NSMenuItem(
+                title: "\(Vocabulary.count()) term\(Vocabulary.count() == 1 ? "" : "s") — click to remove",
+                action: nil, keyEquivalent: "")
+            header.isEnabled = false
+            vocabMenu.addItem(header)
+            for entry in entries {
+                var title = entry.term
+                if entry.pinned { title = "★ " + title }
+                if entry.count > 1 { title += "  (\(entry.count))" }
+                if !entry.aliases.isEmpty {
+                    title += "  ← \(entry.aliases[0])"
+                }
+                let item = NSMenuItem(title: title, action: #selector(removeVocabTerm(_:)), keyEquivalent: "")
+                item.target = self
+                item.representedObject = entry.term
+                item.toolTip = "Remove “\(entry.term)” from your personal dictionary"
+                vocabMenu.addItem(item)
+            }
+        }
+
+        vocabMenu.addItem(.separator())
+        let revealItem = NSMenuItem(title: "Show dictionary file in Finder",
+                                    action: #selector(revealVocabFile), keyEquivalent: "")
+        revealItem.target = self
+        vocabMenu.addItem(revealItem)
+
+        if Vocabulary.count() > 0 {
+            let clearItem = NSMenuItem(title: "Clear personal dictionary…",
+                                       action: #selector(clearVocab), keyEquivalent: "")
+            clearItem.target = self
+            vocabMenu.addItem(clearItem)
+        }
+
+        let vocabItem = NSMenuItem(
+            title: Vocabulary.count() > 0
+                ? "Personal dictionary (\(Vocabulary.count()))"
+                : "Personal dictionary",
+            action: nil, keyEquivalent: "")
+        menu.addItem(vocabItem)
+        menu.setSubmenu(vocabMenu, for: vocabItem)
 
         let appearanceMenu = NSMenu()
         appearanceMenu.autoenablesItems = false
@@ -327,6 +489,9 @@ final class QuillApp: NSObject, NSApplicationDelegate {
 
         let triggerMenu = NSMenu()
         let activeTrigger = Defaults.currentTrigger
+        let keyHeader = NSMenuItem(title: "Simple dictation key", action: nil, keyEquivalent: "")
+        keyHeader.isEnabled = false
+        triggerMenu.addItem(keyHeader)
         for option in Trigger.allCases {
             let item = NSMenuItem(title: option.title, action: #selector(setTrigger(_:)), keyEquivalent: "")
             item.target = self
@@ -339,13 +504,19 @@ final class QuillApp: NSObject, NSApplicationDelegate {
             triggerMenu.addItem(item)
         }
         triggerMenu.addItem(.separator())
-        let single = NSMenuItem(title: "Single tap (instead of double)",
-                                action: #selector(toggleSingleTap), keyEquivalent: "")
-        single.target = self
-        single.state = Defaults.bool(Defaults.singleTap) ? .on : .off
-        single.toolTip = "A tap only counts if nothing else is pressed while the key is held, "
-            + "so ⌃C and friends never trigger it."
-        triggerMenu.addItem(single)
+        let gestureHeader = NSMenuItem(title: "Gesture (both keys)", action: nil, keyEquivalent: "")
+        gestureHeader.isEnabled = false
+        triggerMenu.addItem(gestureHeader)
+        let activeGesture = Defaults.currentGesture
+        for mode in GestureMode.allCases {
+            let item = NSMenuItem(title: mode.menuTitle,
+                                  action: #selector(setGestureMode(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = mode.rawValue
+            item.state = (mode == activeGesture) ? .on : .off
+            item.toolTip = mode.toolTip
+            triggerMenu.addItem(item)
+        }
 
         let triggerItem = NSMenuItem(title: "Trigger", action: nil, keyEquivalent: "")
         menu.addItem(triggerItem)
@@ -412,9 +583,9 @@ final class QuillApp: NSObject, NSApplicationDelegate {
     @objc private func setTrigger(_ sender: NSMenuItem) {
         guard let raw = sender.representedObject as? String,
               let option = Trigger(rawValue: raw) else { return }
-        UserDefaults.standard.set(raw, forKey: Defaults.trigger)
-        hotkey.trigger = option
-        Log.write("trigger set to \(option.rawValue)")
+        Defaults.setPrimaryTrigger(option)
+        applyTriggersAndGesture()
+        Log.write("simple trigger set to \(option.rawValue)")
 
         if option == .fnGlobe {
             // A bare 🌐 press normally shows emoji or switches input source; that
@@ -426,18 +597,127 @@ final class QuillApp: NSObject, NSApplicationDelegate {
             try? task.run()
         }
 
-        hud.apply(.notice("Trigger: \(option.gesture(singleTap: Defaults.bool(Defaults.singleTap)))"))
+        hud.apply(.notice("Simple: \(option.gesture(mode: Defaults.currentGesture))"))
         hud.collapse(after: 2.5)
     }
 
-    @objc private func toggleSingleTap() {
-        Defaults.flip(Defaults.singleTap)
-        let on = Defaults.bool(Defaults.singleTap)
-        applyTapMode()
-        Log.write("singleTap requested = \(on), effective = \(hotkey.singleTap)")
-
-        hud.apply(.notice(Defaults.currentTrigger.gesture(singleTap: hotkey.singleTap)))
+    @objc private func setSmartTrigger(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String,
+              let option = Trigger(rawValue: raw) else { return }
+        Defaults.setSmartTrigger(option)
+        applyTriggersAndGesture()
+        Log.write("smart trigger set to \(Defaults.smartTrigger.rawValue)")
+        hud.apply(.notice("Cleaned: \(Defaults.smartTrigger.gesture(mode: Defaults.currentGesture))"))
         hud.collapse(after: 2.5)
+    }
+
+    @objc private func toggleCleanup() {
+        Defaults.flip(Defaults.cleanupEnabled)
+        // Ensure smart key differs from simple after enabling.
+        if Defaults.cleanupIsOn {
+            Defaults.setSmartTrigger(Defaults.smartTrigger)
+        }
+        applyTriggersAndGesture()
+        let on = Defaults.cleanupIsOn
+        Log.write("cleanup enabled = \(on)")
+        if on {
+            hud.apply(.notice("Cleaned dictation: \(Defaults.smartTrigger.gesture(mode: Defaults.currentGesture))"))
+        } else {
+            hud.apply(.notice("Cleaned dictation off — only simple key active"))
+        }
+        hud.collapse(after: 2.8)
+    }
+
+    @objc private func setGestureMode(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String,
+              let mode = GestureMode(rawValue: raw) else { return }
+        Defaults.setGesture(mode)
+        applyTriggersAndGesture()
+        Log.write("gesture mode set to \(mode.rawValue)")
+
+        hud.apply(.notice(Defaults.currentTrigger.gesture(mode: mode)))
+        hud.collapse(after: 2.5)
+    }
+
+    @objc private func menuToggleRaw() { toggle(lane: .raw) }
+
+    @objc private func toggleVocabLearning() {
+        Vocabulary.learningEnabled.toggle()
+        let on = Vocabulary.learningEnabled
+        Log.write("vocab learning = \(on)")
+        hud.apply(.notice(on
+            ? "Learning unique terms into your local dictionary"
+            : "Stopped learning new terms (existing library kept)"))
+        hud.collapse(after: 2.5)
+    }
+
+    @objc private func addVocabTerm() {
+        let alert = NSAlert()
+        alert.messageText = "Add personal term"
+        alert.informativeText = "Unique name, product, or jargon — not everyday English. "
+            + "Optional: how speech-to-text often mishears it."
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "Add")
+        alert.addButton(withTitle: "Cancel")
+
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.spacing = 6
+        stack.translatesAutoresizingMaskIntoConstraints = false
+
+        let termField = NSTextField(string: "")
+        termField.placeholderString = "Preferred spelling (e.g. Signara)"
+        termField.frame = NSRect(x: 0, y: 0, width: 280, height: 24)
+
+        let aliasField = NSTextField(string: "")
+        aliasField.placeholderString = "Optional mishearing (e.g. Signa)"
+        aliasField.frame = NSRect(x: 0, y: 0, width: 280, height: 24)
+
+        stack.addArrangedSubview(termField)
+        stack.addArrangedSubview(aliasField)
+        stack.setFrameSize(NSSize(width: 280, height: 54))
+        alert.accessoryView = stack
+
+        // Menu was modal; activate briefly so the alert can take focus.
+        NSApp.activate(ignoringOtherApps: true)
+        let response = alert.runModal()
+        guard response == .alertFirstButtonReturn else { return }
+
+        let term = termField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let alias = aliasField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !term.isEmpty else { return }
+        if Vocabulary.addManual(term, alias: alias.isEmpty ? nil : alias) {
+            hud.apply(.notice("Saved “\(term)” to personal dictionary"))
+        } else {
+            hud.apply(.notice("Couldn’t add that term"))
+        }
+        hud.collapse(after: 2.2)
+    }
+
+    @objc private func removeVocabTerm(_ sender: NSMenuItem) {
+        guard let term = sender.representedObject as? String else { return }
+        Vocabulary.remove(term: term)
+        hud.apply(.notice("Removed “\(term)”"))
+        hud.collapse(after: 1.6)
+    }
+
+    @objc private func revealVocabFile() {
+        Vocabulary.revealInFinder()
+    }
+
+    @objc private func clearVocab() {
+        let alert = NSAlert()
+        alert.messageText = "Clear personal dictionary?"
+        alert.informativeText = "Removes all \(Vocabulary.count()) learned terms from this Mac. "
+            + "Cleanup will no longer have your name/product spellings."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Clear")
+        alert.addButton(withTitle: "Cancel")
+        NSApp.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        Vocabulary.clearAll()
+        hud.apply(.notice("Personal dictionary cleared"))
+        hud.collapse(after: 2)
     }
 
     @objc private func resetPanelPosition() {
@@ -454,7 +734,7 @@ final class QuillApp: NSObject, NSApplicationDelegate {
             // With the pill gone there may be no visible affordance left — this
             // Mac's menu bar is often too full to show another item — so say how
             // to get it back before it disappears.
-            hud.apply(.notice("Idle pill hidden. \(Defaults.currentTrigger.gesture(singleTap: hotkey.singleTap)) still works; the menu-bar icon brings it back."))
+            hud.apply(.notice("Idle pill hidden. \(Defaults.currentTrigger.gesture(mode: Defaults.currentGesture)) still works; the menu-bar icon brings it back."))
             hud.collapse(after: 6)
         }
     }
@@ -479,21 +759,56 @@ final class QuillApp: NSObject, NSApplicationDelegate {
 
     // MARK: Session
 
-    @objc private func toggle() {
-        isRecording ? stopSession(reason: .hotkey) : startSession()
+    private func toggle(lane: DictationLane) {
+        if isRecording {
+            stopSession(reason: .hotkey)
+        } else {
+            startSession(fromHold: false, cleanup: lane == .smart)
+        }
+    }
+
+    /// Push-to-talk: key went down cleanly long enough — start listening.
+    private func startHoldSession(lane: DictationLane) {
+        guard !isRecording else { return }
+        Log.write("hold start lane=\(lane.rawValue)")
+        startSession(fromHold: true, cleanup: lane == .smart)
+    }
+
+    /// Push-to-talk: key released — stop and insert.
+    private func endHoldSession(lane: DictationLane) {
+        if !isRecording {
+            // Released during mic permission / auth / setup — drop the pending start.
+            if sessionFromHold {
+                Log.write("hold end before recording started — discarded (lane=\(lane.rawValue))")
+                sessionFromHold = false
+                sessionUsesCleanup = false
+            }
+            hotkey.resetHoldState()
+            return
+        }
+        guard sessionFromHold else {
+            hotkey.resetHoldState()
+            return
+        }
+        Log.write("hold end — stopping (lane=\(lane.rawValue))")
+        stopSession(reason: .hold)
     }
 
     private func handleClickAnywhere(at point: CGPoint) {
         let onPill = hud.contains(globalPoint: point)
         Log.write("click seen at \(Int(point.x)),\(Int(point.y)) — recording=\(isRecording) onPill=\(onPill)")
         guard isRecording, Defaults.bool(Defaults.clickToInsert) else { return }
+        // During hold-to-talk the release is the stop; clicks stay out of the way.
+        guard !sessionFromHold else { return }
         // A click on the pill is the pill's own business.
         guard !onPill else { return }
         stopSession(reason: .click)
     }
 
-    private func startSession() {
+    private func startSession(fromHold: Bool = false, cleanup: Bool = false) {
         guard !isRecording else { return }
+        sessionFromHold = fromHold
+        sessionUsesCleanup = cleanup
 
         // Grab the highlighted text now — clicking a destination later would
         // destroy it, and this is the only moment it is reliably present.
@@ -507,6 +822,9 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         Recorder.micAuthorization { [weak self] granted in
             guard let self else { return }
             guard granted else {
+                self.sessionFromHold = false
+                self.sessionUsesCleanup = false
+                self.hotkey.resetHoldState()
                 self.hud.apply(.notice("Microphone access denied — enable Quill in Privacy & Security ▸ Microphone"))
                 self.hud.collapse(after: 4)
                 Inserter.openPrivacyPane("Privacy_Microphone")
@@ -518,8 +836,19 @@ final class QuillApp: NSObject, NSApplicationDelegate {
 
     private func beginCapture() {
         guard let creds = Auth.load() else {
+            sessionFromHold = false
+            sessionUsesCleanup = false
+            hotkey.resetHoldState()
             hud.apply(.notice("No Grok Build session found — run `grok` once to sign in"))
             hud.collapse(after: 4)
+            return
+        }
+
+        // If this was a hold and the key is already up, don't start a ghost session.
+        if sessionFromHold, !hotkey.isHolding, Defaults.currentGesture == .hold {
+            Log.write("hold released before capture ready — aborting start")
+            sessionFromHold = false
+            sessionUsesCleanup = false
             return
         }
 
@@ -528,7 +857,7 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         pendingPCM = []
         socketReady = false
         sawAnyText = false
-        stopReason = .hotkey
+        stopReason = sessionFromHold ? .hold : .hotkey
         didRunVoiceCommand = false
         lastStopCandidate = nil
         lastPauseCandidate = nil
@@ -549,10 +878,14 @@ final class QuillApp: NSObject, NSApplicationDelegate {
             }
 
             self.considerVoiceStop(after: text)
-            self.armPauseStop(after: text)
+            // Silence auto-finish fights hold-to-talk (release is the stop).
+            if !self.sessionFromHold {
+                self.armPauseStop(after: text)
+            }
 
             // Show what will actually be inserted, command phrases already removed.
-            self.hud.update(text: VoiceCommands.stripAll(text))
+            let preview = VoiceCommands.stripAll(text)
+            self.hud.update(text: self.sessionUsesCleanup ? "✦ \(preview)" : preview)
         }
         client.onComplete = { [weak self] text in self?.finishSession(with: text) }
         client.onFailure = { [weak self] failure in self?.abortSession(message: failure.message) }
@@ -579,6 +912,9 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         } catch {
             stt?.cancel()
             stt = nil
+            sessionFromHold = false
+            sessionUsesCleanup = false
+            hotkey.resetHoldState()
             hud.apply(.notice(error.localizedDescription))
             hud.collapse(after: 3.5)
             return
@@ -592,14 +928,18 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         startedAt = Date()
         refreshIcon()
         hud.apply(.listening)
+        if sessionUsesCleanup {
+            hud.flashTarget("cleaned dictation", for: 1.6)
+        }
         if let selection = capturedSelection {
             hud.flashTarget("replacing \(selection.range.length) selected characters", for: 3)
         }
         let front = Inserter.frontmostApp()
         hud.update(target: front.name, icon: front.icon)
-        hotkey.watchClicks = Defaults.bool(Defaults.clickToInsert)
+        // Hold-to-talk stops on release; click-to-insert is only for tap modes.
+        hotkey.watchClicks = !sessionFromHold && Defaults.bool(Defaults.clickToInsert)
         hotkey.watchForCancel(true)
-        Log.write("recording started — watchClicks=\(hotkey.watchClicks)")
+        Log.write("recording started — watchClicks=\(hotkey.watchClicks) fromHold=\(sessionFromHold) cleanup=\(sessionUsesCleanup)")
 
         tickTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
             guard let self, let startedAt = self.startedAt else { return }
@@ -725,12 +1065,15 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         guard isRecording else { return }
         Log.write("cancelled by Escape")
         isRecording = false
+        sessionFromHold = false
+        sessionUsesCleanup = false
         pendingVoiceStop?.cancel()
         pendingVoiceStop = nil
         pendingPauseStop?.cancel()
         pendingPauseStop = nil
         hotkey.watchClicks = false
         hotkey.watchForCancel(false)
+        hotkey.resetHoldState()
         invalidateTimers()
         recorder.stop()
         stt?.cancel()
@@ -765,6 +1108,8 @@ final class QuillApp: NSObject, NSApplicationDelegate {
     private func stopSession(reason: StopReason) {
         guard isRecording else { return }
         isRecording = false
+        sessionFromHold = false
+        // Keep sessionUsesCleanup until finishSession so the cleanup pass can run.
         stopReason = reason
         pendingVoiceStop?.cancel()
         pendingVoiceStop = nil
@@ -772,6 +1117,10 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         pendingPauseStop = nil
         hotkey.watchClicks = false
         hotkey.watchForCancel(false)
+        if reason != .hold {
+            // Hold path already cleared active state on key-up; other stops need it.
+            hotkey.resetHoldState()
+        }
         invalidateTimers()
         recorder.stop()
         refreshIcon()
@@ -779,7 +1128,15 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         // Never discard the session just because no partial has arrived yet — on
         // the first recording the socket is often still connecting. Let it finish
         // and decide on the actual transcript instead.
-        Log.write("stop (\(reason == .click ? "click" : (reason == .voice ? "voice" : "hotkey/pill"))) — finalising, sawText=\(sawAnyText)")
+        let reasonLabel: String = {
+            switch reason {
+            case .click:  return "click"
+            case .voice:  return "voice"
+            case .hold:   return "hold-release"
+            case .hotkey: return "hotkey/pill"
+            }
+        }()
+        Log.write("stop (\(reasonLabel)) — finalising, sawText=\(sawAnyText) cleanup=\(sessionUsesCleanup)")
         finaliseStartedAt = Date()
         logAudioState()
         hud.apply(.thinking)
@@ -790,6 +1147,9 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         stt = nil
         // The command phrase must never reach the target app.
         let trimmed = VoiceCommands.stripAll(text).trimmingCharacters(in: .whitespacesAndNewlines)
+        let wantsCleanup = sessionUsesCleanup
+        sessionUsesCleanup = false
+
         guard !trimmed.isEmpty else {
             if didRunVoiceCommand {
                 hud.apply(.notice("Opened Grok Build"))
@@ -801,11 +1161,39 @@ final class QuillApp: NSObject, NSApplicationDelegate {
             return
         }
 
-        remember(trimmed)
-        hud.update(text: trimmed)
+        if wantsCleanup, let creds = Auth.load() {
+            let vocabN = Vocabulary.count()
+            hud.flashTarget(vocabN > 0
+                ? "cleaning with Grok… (\(vocabN) personal terms)"
+                : "cleaning with Grok…", for: 8)
+            hud.update(text: trimmed)
+            Cleaner.clean(trimmed, token: creds.token) { [weak self] outcome in
+                guard let self else { return }
+                switch outcome {
+                case .cleaned(let polished):
+                    Vocabulary.learnFromCleanup(raw: trimmed, cleaned: polished)
+                    self.deliverInsert(polished, notedCleanup: true)
+                case .failed(let message):
+                    Log.write("cleanup failed — using raw: \(message)")
+                    self.hud.flashTarget("cleanup failed — pasting raw", for: 2)
+                    self.deliverInsert(trimmed, notedCleanup: false)
+                }
+            }
+            return
+        }
+
+        deliverInsert(trimmed, notedCleanup: false)
+    }
+
+    /// Remember + insert into the focused field.
+    private func deliverInsert(_ text: String, notedCleanup: Bool) {
+        // Grow the local unique-term library from what was actually inserted.
+        Vocabulary.learnFromFinalText(text)
+        remember(text)
+        hud.update(text: text)
 
         if selfTestPath != nil {
-            FileHandle.standardError.write(Data("SELFTEST RESULT: \(trimmed)\n".utf8))
+            FileHandle.standardError.write(Data("SELFTEST RESULT: \(text)\n".utf8))
             // Lets a test wait for background work (e.g. launching Grok) to finish.
             let hold = Double(ProcessInfo.processInfo.environment["QUILL_SELFTEST_HOLD"] ?? "") ?? 0
             guard ProcessInfo.processInfo.environment["QUILL_SELFTEST_INSERT"] != nil else {
@@ -817,7 +1205,7 @@ final class QuillApp: NSObject, NSApplicationDelegate {
             FileHandle.standardError.write(Data("SELFTEST FOCUS: \(Inserter.describeFocus())\n".utf8))
             let testSelection = self.capturedSelection
             self.capturedSelection = nil
-            Inserter.insert(trimmed,
+            Inserter.insert(text,
                             atEndOfField: Defaults.bool(Defaults.insertAtEnd),
                             replacing: testSelection) { outcome in
                 let method: String
@@ -827,7 +1215,7 @@ final class QuillApp: NSObject, NSApplicationDelegate {
                 case .blocked:       method = "BLOCKED (no Accessibility)"
                 }
                 self.hud.apply(.delivered(outcome.app))
-                self.hud.update(text: trimmed)
+                self.hud.update(text: text)
                 // Success is reported as soon as ⌘V is posted, so give the target
                 // app a moment to actually apply it before reading back.
                 Thread.sleep(forTimeInterval: 0.6)
@@ -851,17 +1239,18 @@ final class QuillApp: NSObject, NSApplicationDelegate {
             guard let self else { return }
             let selection = self.capturedSelection
             self.capturedSelection = nil
-            Inserter.insert(trimmed,
+            Inserter.insert(text,
                             atEndOfField: Defaults.bool(Defaults.insertAtEnd),
                             replacing: selection) { outcome in
                 switch outcome.method {
                 case .accessibility, .clipboard:
                     if let started = self.finaliseStartedAt {
                         Log.write("  tail: stop → inserted in "
-                            + String(format: "%.2fs", Date().timeIntervalSince(started)))
+                            + String(format: "%.2fs", Date().timeIntervalSince(started))
+                            + (notedCleanup ? " (cleaned)" : ""))
                     }
                     self.hud.apply(.delivered(outcome.app))
-                    self.hud.update(text: trimmed)
+                    self.hud.update(text: text)
                     self.hud.collapse(after: 0.7)
                 case .blocked:
                     self.hud.apply(.notice("Grant Accessibility to Quill so it can write into apps"))
@@ -875,12 +1264,15 @@ final class QuillApp: NSObject, NSApplicationDelegate {
     private func abortSession(message: String) {
         Log.write("aborted — \(message)")
         isRecording = false
+        sessionFromHold = false
+        sessionUsesCleanup = false
         pendingVoiceStop?.cancel()
         pendingVoiceStop = nil
         pendingPauseStop?.cancel()
         pendingPauseStop = nil
         hotkey.watchClicks = false
         hotkey.watchForCancel(false)
+        hotkey.resetHoldState()
         invalidateTimers()
         recorder.stop()
         stt?.cancel()

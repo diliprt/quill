@@ -210,9 +210,13 @@ final class SetupWindow: NSObject, NSWindowDelegate {
             if !satisfied { allGood = false }
         }
 
-        let gesture = Defaults.currentTrigger.gesture(singleTap: Defaults.bool(Defaults.singleTap))
+        let gesture = Defaults.currentTrigger.gesture(mode: Defaults.currentGesture)
         if allGood {
-            footer.stringValue = "You're set. \(gesture) to start talking, then click where you want the words."
+            if Defaults.currentGesture == .hold {
+                footer.stringValue = "You're set. \(gesture) to talk; release to insert the words."
+            } else {
+                footer.stringValue = "You're set. \(gesture) to start talking, then click where you want the words."
+            }
             footer.textColor = .secondaryLabelColor
             onReady()
         } else {

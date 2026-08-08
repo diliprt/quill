@@ -241,6 +241,10 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         }
         refreshIcon()
 
+        // Built-in AI/coding-harness spellings (Grok, Claude, MCP, GGUF, …).
+        // Merges once per seed version; never overwrites pinned user terms.
+        _ = Vocabulary.ensureStandardSeed()
+
         if selfTestPath != nil {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in self?.toggle(lane: .raw) }
         } else {
@@ -423,6 +427,13 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         editItem.toolTip = "After Quill inserts text, if you fix a word in an Accessibility-readable "
             + "field, that correction is added to the personal dictionary."
         vocabMenu.addItem(editItem)
+
+        let seedItem = NSMenuItem(title: "Install standard AI / harness vocabulary",
+                                  action: #selector(installStandardVocab), keyEquivalent: "")
+        seedItem.target = self
+        seedItem.toolTip = "Merge built-in spellings for Grok, Claude, MCP, GGUF, agents, etc. "
+            + "Does not overwrite your pinned terms."
+        vocabMenu.addItem(seedItem)
 
         let addItem = NSMenuItem(title: "Add term…", action: #selector(addVocabTerm), keyEquivalent: "")
         addItem.target = self
@@ -674,6 +685,14 @@ final class QuillApp: NSObject, NSApplicationDelegate {
             ? "Will learn dictionary terms from your post-paste edits"
             : "Won't watch fields for edits"))
         hud.collapse(after: 2.6)
+    }
+
+    @objc private func installStandardVocab() {
+        let n = Vocabulary.ensureStandardSeed(force: true)
+        hud.apply(.notice(n == 0
+            ? "Standard AI vocabulary already up to date (\(Vocabulary.count()) terms)"
+            : "Merged \(n) standard AI/harness terms (\(Vocabulary.count()) total)"))
+        hud.collapse(after: 3)
     }
 
     @objc private func addVocabTerm() {

@@ -93,9 +93,17 @@ enum Vocabulary {
               let decoded = try? JSONDecoder().decode([Entry].self, from: data)
         else { return [] }
         // Drop anything that is clearly everyday English (list improves over time).
+        // Keep pinned terms and the built-in AI/harness seed pack.
         return decoded.filter { entry in
             if entry.pinned { return true }
+            if isStandardSeedTerm(entry.term) { return true }
             return !isCommonWord(entry.term) && looksUnique(entry.term)
+        }
+    }
+
+    private static func isStandardSeedTerm(_ term: String) -> Bool {
+        standardHarnessTerms.contains {
+            $0.term.caseInsensitiveCompare(term) == .orderedSame
         }
     }
 
@@ -126,10 +134,192 @@ enum Vocabulary {
         set { UserDefaults.standard.set(newValue, forKey: "vocabLearnFromEdits") }
     }
 
+    /// Version of the built-in AI/harness seed pack. Bump when the list grows so
+    /// existing installs merge new terms once without clobbering user pins.
+    private static let standardSeedVersion = 1
+    private static let standardSeedVersionKey = "vocabStandardSeedVersion"
+
     /// Terms sorted for the menu (pinned first, then count).
     static func listed(limit: Int = 40) -> [Entry] {
         Array(all().prefix(limit))
     }
+
+    /// Merge the built-in AI / coding-harness vocabulary once per seed version
+    /// (or force). Never overwrites pinned user terms; only fills missing aliases
+    /// on existing unpinned matches.
+    @discardableResult
+    static func ensureStandardSeed(force: Bool = false) -> Int {
+        let applied = UserDefaults.standard.integer(forKey: standardSeedVersionKey)
+        guard force || applied < standardSeedVersion else { return 0 }
+
+        var added = 0
+        mutate { entries in
+            for seed in standardHarnessTerms {
+                let term = seed.term
+                if let i = entries.firstIndex(where: {
+                    $0.term.caseInsensitiveCompare(term) == .orderedSame
+                }) {
+                    // Keep user's preferred casing if pinned; still add missing aliases.
+                    var e = entries[i]
+                    var changed = false
+                    for a in seed.aliases {
+                        let aTrim = a.trimmingCharacters(in: .whitespacesAndNewlines)
+                        guard !aTrim.isEmpty else { continue }
+                        if !e.aliases.contains(where: {
+                            $0.caseInsensitiveCompare(aTrim) == .orderedSame
+                        }) {
+                            e.aliases.append(aTrim)
+                            changed = true
+                        }
+                    }
+                    if e.aliases.count > maxAliasesPerTerm {
+                        e.aliases = Array(e.aliases.prefix(maxAliasesPerTerm))
+                    }
+                    if !e.pinned {
+                        e.count = max(e.count, 3)
+                    }
+                    if changed {
+                        entries[i] = e
+                        added += 1
+                    }
+                } else {
+                    entries.append(Entry(
+                        term: term,
+                        aliases: seed.aliases,
+                        count: 3,
+                        lastSeen: Date().timeIntervalSince1970,
+                        pinned: false
+                    ))
+                    added += 1
+                }
+            }
+        }
+        UserDefaults.standard.set(standardSeedVersion, forKey: standardSeedVersionKey)
+        if added > 0 {
+            Log.write("vocab: standard AI/harness seed v\(standardSeedVersion) merged \(added) term(s) (library=\(count()))")
+        } else {
+            Log.write("vocab: standard AI/harness seed v\(standardSeedVersion) already present")
+        }
+        return added
+    }
+
+    /// Built-in spellings for AI coding harnesses, models, and STT tools.
+    /// Aliases are common speech-to-text mishearings.
+    private static let standardHarnessTerms: [(term: String, aliases: [String])] = [
+        // xAI / Grok / this app
+        ("Grok", ["Grock", "Grog", "Croc", "Grokk"]),
+        ("Grok Build", ["Grock Build", "Grog Build", "Grok build", "Grock build"]),
+        ("Grok 4.5", ["Grok 4 point 5", "Grok four five", "Grok 4 5"]),
+        ("xAI", ["X AI", "ex AI", "X.A.I."]),
+        ("SpaceXAI", ["Space X AI", "SpaceX AI", "space x a i"]),
+        ("Quill", ["Quil", "Qwil", "Qwill", "QWELL", "Kwilt"]),
+        ("SuperGrok", ["Super Grok", "Super Grock"]),
+
+        // Agent harness / IDE agents
+        ("Claude", ["Clod", "Clawed", "Claud"]),
+        ("Claude Code", ["Clod Code", "Claude code", "Cloud Code"]),
+        ("Codex", ["Code X", "CodeX", "Codecks"]),
+        ("Cursor", ["Curser", "Cursur"]),
+        ("GitHub Copilot", ["Copilot", "Co-pilot", "Github Copilot", "Co pilot"]),
+        ("Windsurf", ["Wind surf", "Windsorf"]),
+        ("Aider", ["Aid er", "Adar"]),
+        ("Devin", ["Devon", "Devan"]),
+        ("OpenHands", ["Open Hands", "Openhands"]),
+        ("SWE-agent", ["SWE agent", "swe agent", "S W E agent"]),
+        ("Terminal-Bench", ["Terminal Bench", "terminal bench"]),
+        ("coding agent", ["coding agents", "code agent"]),
+        ("agent harness", ["agent hairness", "AI harness", "harness"]),
+
+        // Protocols & architecture
+        ("MCP", ["M C P", "em cee pee"]),
+        ("Model Context Protocol", ["model context protocol"]),
+        ("RAG", ["R A G"]),
+        ("LLM", ["L L M", "large language model"]),
+        ("STT", ["S T T", "speech to text", "speech-to-text"]),
+        ("TTS", ["T T S", "text to speech", "text-to-speech"]),
+        ("ASR", ["A S R"]),
+        ("BYOK", ["B Y O K", "bring your own key"]),
+        ("OIDC", ["O I D C"]),
+        ("API", ["A P I"]),
+        ("SDK", ["S D K"]),
+        ("CLI", ["C L I"]),
+        ("JSON", ["J S O N", "jay son"]),
+        ("YAML", ["Y A M L"]),
+        ("HTTP", ["H T T P"]),
+        ("WebSocket", ["web socket", "websocket"]),
+        ("OAuth", ["O Auth", "oauth"]),
+        ("tokenizer", ["token izer", "tokeniser"]),
+        ("embeddings", ["embedding"]),
+        ("fine-tune", ["finetune", "fine tune", "fine tuning"]),
+        ("context window", ["contextwindow", "context-window"]),
+        ("system prompt", ["systemprompt", "system-prompt"]),
+        ("subagent", ["sub agent", "sub-agent", "sub agents"]),
+        ("agentic", ["a gentic", "agent tick"]),
+        ("tool call", ["toolcall", "tool-call", "function call"]),
+        ("function calling", ["function-calling"]),
+        ("worktree", ["work tree", "git worktree"]),
+        ("plan mode", ["Plan Mode", "plan-mode"]),
+
+        // Local / open models & runtimes
+        ("Hugging Face", ["HuggingFace", "hugging face"]),
+        ("MLX", ["M L X", "em el ex"]),
+        ("GGUF", ["G G U F", "gee gee you ef"]),
+        ("Ollama", ["O llama", "Olama", "Oh llama"]),
+        ("llama.cpp", ["llama cpp", "llama C plus plus", "llamacpp"]),
+        ("Whisper", ["Whisper model", "OpenAI Whisper"]),
+        ("whisper.cpp", ["whisper cpp", "whispercpp"]),
+        ("Parakeet", ["Para keet", "pair a keet"]),
+        ("NVIDIA Parakeet", ["Nvidia Parakeet"]),
+        ("DeepSeek", ["Deep Seek", "deepseek"]),
+        ("Qwen", ["Quen", "Q when", "Chwen"]),
+        ("Gemma", ["Jemma", "Gemma model"]),
+        ("Llama", ["LLaMA"]),
+        ("Mistral", ["Mistrahl", "Miss tral"]),
+        ("vLLM", ["V L L M", "v llm"]),
+        ("LM Studio", ["L M Studio", "LMStudio"]),
+        ("Core ML", ["CoreML", "core m l"]),
+        ("Apple Silicon", ["apple silicon"]),
+        ("M5 Max", ["M 5 Max", "M5 max", "em five max"]),
+
+        // Dictation peers
+        ("Wispr Flow", ["Whisper Flow", "WhisperFlow", "Wispr"]),
+        ("Superwhisper", ["Super Whisper", "super whisper"]),
+        ("MacWhisper", ["Mac Whisper", "mac whisper"]),
+        ("FreeFlow", ["Free Flow", "freeflow"]),
+        ("FluidVoice", ["Fluid Voice", "Fluid Whisper", "fluidvoice"]),
+        ("MacParakeet", ["Mac Parakeet", "mac parakeet"]),
+        ("OpenWhispr", ["Open Whisper", "OpenWhisper", "open whispr"]),
+
+        // Cloud / providers
+        ("OpenAI", ["Open AI"]),
+        ("Anthropic", ["An thropic", "Anthropic AI"]),
+        ("Gemini", ["Gemeni", "Jimini"]),
+        ("ChatGPT", ["Chat G P T", "Chat GPT"]),
+        ("Groq", ["Grock inference"]),
+        ("OpenRouter", ["Open Router", "openrouter"]),
+
+        // Dev platforms
+        ("GitHub", ["Github", "git hub", "Git Hub"]),
+        ("GitLab", ["Git Lab", "gitlab"]),
+        ("pull request", ["pullrequest"]),
+        ("Graphite", ["graph ite"]),
+        ("VS Code", ["VSCode", "V S Code", "Visual Studio Code"]),
+        ("Xcode", ["X code", "ex code"]),
+        ("SwiftUI", ["Swift UI", "swift u i"]),
+        ("TypeScript", ["Type Script"]),
+        ("Node.js", ["Node JS", "nodejs"]),
+        ("Kubernetes", ["K8s", "kubes", "coo bernetes"]),
+        ("Firebase", ["Fire base"]),
+        ("Postgres", ["PostgreSQL", "post gress"]),
+        ("Tailwind", ["tail wind", "Tailwind CSS"]),
+
+        // Product names used with this fork
+        ("Syanara", ["Signara", "Synara", "Signa", "Sainara", "Cyannara", "Sai Nara"]),
+        ("Syanara Ward", ["Signara Ward", "Synara Ward", "Signa Ward"]),
+        ("Origin Ark", ["OriginArk", "origin ark"]),
+        ("Ghostty", ["Ghosty", "Ghost tee", "ghosty"]),
+        ("Accessibility", ["access ability"]),
+    ]
 
     /// Block injected into the cleanup system prompt.
     static func promptBlock(limit: Int = 80) -> String {

@@ -5,7 +5,7 @@
 > **This repository** ([diliprt/quill](https://github.com/diliprt/quill)) is a public fork of
 > [xfreeze2/quill](https://github.com/xfreeze2/quill). Upstream behaviour is preserved; this
 > fork adds hold-to-talk, dual-key Grok cleanup, and a local personal dictionary.
-> Current fork build: **0.6.3** (tracks upstream [v0.6.0](https://github.com/xfreeze2/quill/releases/tag/v0.6.0) ideas; keeps dual-key cleanup + dictionary).
+> Current fork build: **0.6.4** — our features plus selected upstream 0.7 fixes (no full rebase; BYOK not included).
 
 Tap a key, talk, then click into whatever window you want the words in. They appear there — at
 the end of what's already written, without touching your clipboard.
@@ -51,11 +51,16 @@ git merge upstream/main    # or: git rebase upstream/main
 git push origin main
 ```
 
-### vs upstream v0.6.0
+### Ported from upstream (without full rebase)
 
-Upstream [v0.6.0](https://github.com/xfreeze2/quill/releases/tag/v0.6.0) added optional **Clean up grammar** (`Polish.swift`) on every dictation when toggled (off by default), with warm-up and a “must resemble original” guard.
-
-This fork already had a stronger cleanup lane (separate **smart key**, OpenWhispr/FreeFlow-style prompt, personal dictionary). **0.6.1** absorbed upstream’s warm-up + resemble safety into our `Cleaner` path rather than shipping a second parallel polisher. Dual keys and the local dictionary remain fork-only.
+| Upstream | In this fork |
+|----------|----------------|
+| Mic-based pause (don’t cut mid-sentence) | Yes — adaptive noise floor; default 5s |
+| Insert spacing (don’t glue words) | Yes |
+| Log privacy + log size cap; no selected-text dump | Yes |
+| Clear / disable recent transcript history | Yes |
+| BYOK xAI API key | **No** (Grok Build session only) |
+| Their minimal `Polish.swift` toggle | **No** — we use dual-key `Cleaner` + dictionary instead |
 
 Everything below is the original upstream documentation (still accurate for core dictation, install, privacy, and build).
 

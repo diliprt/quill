@@ -30,6 +30,8 @@ enum Defaults {
     static let vocabLearning = "vocabLearning"
     /// After paste, re-read the field and learn from hand edits.
     static let vocabLearnFromEdits = "vocabLearnFromEdits"
+    /// Store recent transcripts in preferences (plaintext — optional).
+    static let keepHistory = "keepHistory"
 
     static func register() {
         UserDefaults.standard.register(defaults: [
@@ -42,11 +44,13 @@ enum Defaults {
             // Default stays single-tap; hold is opt-in via the Trigger menu.
             gestureMode: GestureMode.single.rawValue,
             stopPhrase: true,
-            pauseSeconds: 3.0,
+            // Upstream 0.7: 5s default — 3s cut people off mid-thought.
+            pauseSeconds: 5.0,
             cleanupEnabled: false,
             cleanupTrigger: Trigger.rightOption.rawValue,
             vocabLearning: true,
             vocabLearnFromEdits: true,
+            keepHistory: true,
         ])
     }
 
@@ -135,8 +139,11 @@ final class QuillApp: NSObject, NSApplicationDelegate {
     private var finaliseStartedAt: Date?
     private var pendingVoiceStop: DispatchWorkItem?
     private var lastStopCandidate: String?
-    private var pendingPauseStop: DispatchWorkItem?
-    private var lastPauseCandidate: String?
+    /// Mic-based pause-to-finish (upstream 0.7 — not transcript silence).
+    private var pauseTimer: Timer?
+    private var lastVoiceAt = Date()
+    private var lastActivityText: String?
+    private var noiseFloor: Float = 0.02
     private var capturedSelection: Inserter.Selection?
     private var startedAt: Date?
 
@@ -358,8 +365,9 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         menu.addItem(.separator())
 
         let history = UserDefaults.standard.stringArray(forKey: Defaults.history) ?? []
-        if !history.isEmpty {
+        do {
             let recent = NSMenu()
+            recent.autoenablesItems = false
             for (index, entry) in history.prefix(8).enumerated() {
                 let title = entry.count > 60 ? String(entry.prefix(60)) + "…" : entry
                 let item = NSMenuItem(title: title, action: #selector(copyHistory(_:)), keyEquivalent: "")
@@ -367,6 +375,17 @@ final class QuillApp: NSObject, NSApplicationDelegate {
                 item.tag = index
                 recent.addItem(item)
             }
+            recent.addItem(.separator())
+            let clear = NSMenuItem(title: "Clear recent", action: #selector(clearHistory), keyEquivalent: "")
+            clear.target = self
+            recent.addItem(clear)
+            let keep = NSMenuItem(title: "Keep recent transcripts",
+                                  action: #selector(toggleKeepHistory), keyEquivalent: "")
+            keep.target = self
+            keep.state = Defaults.bool(Defaults.keepHistory) ? .on : .off
+            keep.toolTip = "Stored in preferences as plain text. Turn off if you dictate anything private."
+            recent.addItem(keep)
+
             let recentItem = NSMenuItem(title: "Recent", action: nil, keyEquivalent: "")
             menu.addItem(recentItem)
             menu.setSubmenu(recent, for: recentItem)
@@ -498,7 +517,8 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         let pauseMenu = NSMenu()
         pauseMenu.autoenablesItems = false
         let pauseOptions: [(String, Double)] = [
-            ("Off", 0), ("After 1.5 seconds", 1.5), ("After 3 seconds", 3.0), ("After 5 seconds", 5.0),
+            ("Off", 0), ("After 2 seconds", 2.0), ("After 3 seconds", 3.0),
+            ("After 5 seconds", 5.0), ("After 8 seconds", 8.0),
         ]
         let currentPause = Defaults.pause
         for (label, seconds) in pauseOptions {
@@ -797,6 +817,23 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         hud.collapse(after: 1.2)
     }
 
+    @objc private func clearHistory() {
+        UserDefaults.standard.removeObject(forKey: Defaults.history)
+        Log.write("recent transcripts cleared")
+        hud.apply(.notice("Recent transcripts cleared"))
+        hud.collapse(after: 2)
+    }
+
+    @objc private func toggleKeepHistory() {
+        Defaults.flip(Defaults.keepHistory)
+        let on = Defaults.bool(Defaults.keepHistory)
+        if !on { UserDefaults.standard.removeObject(forKey: Defaults.history) }
+        Log.write("keep recent transcripts = \(on)")
+        hud.apply(.notice(on ? "Keeping recent transcripts"
+                             : "Not keeping transcripts — existing ones cleared"))
+        hud.collapse(after: 2.5)
+    }
+
     @objc private func openSetup() { setup.show() }
 
     @objc private func quit() { NSApp.terminate(nil) }
@@ -906,7 +943,6 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         stopReason = sessionFromHold ? .hold : .hotkey
         didRunVoiceCommand = false
         lastStopCandidate = nil
-        lastPauseCandidate = nil
 
         client.onReady = { [weak self] in
             guard let self else { return }
@@ -924,9 +960,11 @@ final class QuillApp: NSObject, NSApplicationDelegate {
             }
 
             self.considerVoiceStop(after: text)
-            // Silence auto-finish fights hold-to-talk (release is the stop).
-            if !self.sessionFromHold {
-                self.armPauseStop(after: text)
+            // Hold-to-talk: release is the stop — skip auto-finish pause watch signals.
+            // Only NEW words count as activity (unchanged partials re-fire constantly).
+            if !self.sessionFromHold, text != self.lastActivityText {
+                self.lastActivityText = text
+                self.noteVoiceActivity()
             }
 
             // Show what will actually be inserted, command phrases already removed.
@@ -936,8 +974,7 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         client.onComplete = { [weak self] text in self?.finishSession(with: text) }
         client.onFailure = { [weak self] failure in self?.abortSession(message: failure.message) }
 
-        // Upstream 0.6.0 idea: warm the cleanup TLS path while they still speak
-        // (cold ~1.9s vs warm ~0.9s). Only for the smart / cleaned lane.
+        // Warm cleanup TLS while they still speak (cold ~1.9s vs warm ~0.9s).
         if sessionUsesCleanup {
             Cleaner.warm(token: creds.token)
         }
@@ -951,7 +988,11 @@ final class QuillApp: NSObject, NSApplicationDelegate {
             else if self.pendingPCM.count < 200 { self.pendingPCM.append(data) }
         }
         recorder.onLevel = { [weak self] level in
-            DispatchQueue.main.async { self?.hud.update(level: level) }
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if !self.sessionFromHold { self.observe(level: level) }
+                self.hud.update(level: level)
+            }
         }
 
         if let selfTestPath {
@@ -991,6 +1032,10 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         // Hold-to-talk stops on release; click-to-insert is only for tap modes.
         hotkey.watchClicks = !sessionFromHold && Defaults.bool(Defaults.clickToInsert)
         hotkey.watchForCancel(true)
+        lastVoiceAt = Date()
+        lastActivityText = nil
+        noiseFloor = 0.02
+        if !sessionFromHold { startPauseWatch() }
         Log.write("recording started — watchClicks=\(hotkey.watchClicks) fromHold=\(sessionFromHold) cleanup=\(sessionUsesCleanup)")
 
         tickTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
@@ -1121,8 +1166,8 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         sessionUsesCleanup = false
         pendingVoiceStop?.cancel()
         pendingVoiceStop = nil
-        pendingPauseStop?.cancel()
-        pendingPauseStop = nil
+        pauseTimer?.invalidate()
+        pauseTimer = nil
         hotkey.watchClicks = false
         hotkey.watchForCancel(false)
         hotkey.resetHoldState()
@@ -1135,26 +1180,36 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         hud.collapse(after: 0.9)
     }
 
-    /// Finish once the words stop arriving.
+    /// Finish once the microphone actually goes quiet (upstream 0.7).
     ///
-    /// Silence is judged by the transcript going quiet rather than by microphone
-    /// level, because a noisy room keeps the level up while nobody is speaking.
-    /// The timer only restarts when the words actually change, so a server
-    /// re-sending an unchanged partial cannot hold the session open forever.
-    private func armPauseStop(after text: String) {
-        let window = Defaults.pause
-        guard window > 0, isRecording, !text.isEmpty, text != lastPauseCandidate else { return }
-        lastPauseCandidate = text
+    /// Transcript silence was the wrong signal — updates lag speech and gap
+    /// between segments, so sessions ended mid-sentence. Silence now means both
+    /// the mic is below the adaptive noise floor and no new words arrived.
+    private func noteVoiceActivity() {
+        lastVoiceAt = Date()
+    }
 
-        pendingPauseStop?.cancel()
-        let work = DispatchWorkItem { [weak self] in
-            guard let self, self.isRecording else { return }
-            Log.write("pause stop: \(String(format: "%.1f", window))s without new speech")
+    private func observe(level: Float) {
+        if level < noiseFloor {
+            noiseFloor = noiseFloor * 0.90 + level * 0.10
+        } else {
+            noiseFloor = noiseFloor * 0.995 + level * 0.005
+        }
+        if level > max(0.07, noiseFloor * 2.5) { noteVoiceActivity() }
+    }
+
+    private func startPauseWatch() {
+        pauseTimer?.invalidate()
+        guard Defaults.pause > 0 else { return }
+        pauseTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            let quiet = Date().timeIntervalSince(self.lastVoiceAt)
+            let window = Defaults.pause
+            guard self.isRecording, self.sawAnyText, window > 0, quiet >= window else { return }
+            Log.write("pause stop: \(String(format: "%.1f", quiet))s of silence")
             self.hud.flashTarget("finishing…", for: 2)
             self.stopSession(reason: .voice)
         }
-        pendingPauseStop = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + window, execute: work)
     }
 
     private func stopSession(reason: StopReason) {
@@ -1165,8 +1220,8 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         stopReason = reason
         pendingVoiceStop?.cancel()
         pendingVoiceStop = nil
-        pendingPauseStop?.cancel()
-        pendingPauseStop = nil
+        pauseTimer?.invalidate()
+        pauseTimer = nil
         hotkey.watchClicks = false
         hotkey.watchForCancel(false)
         if reason != .hold {
@@ -1322,8 +1377,8 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         sessionUsesCleanup = false
         pendingVoiceStop?.cancel()
         pendingVoiceStop = nil
-        pendingPauseStop?.cancel()
-        pendingPauseStop = nil
+        pauseTimer?.invalidate()
+        pauseTimer = nil
         hotkey.watchClicks = false
         hotkey.watchForCancel(false)
         hotkey.resetHoldState()
@@ -1337,14 +1392,17 @@ final class QuillApp: NSObject, NSApplicationDelegate {
     }
 
     private func invalidateTimers() {
-        [silenceTimer, maxDurationTimer, tickTimer, selfTestTimer].forEach { $0?.invalidate() }
+        [silenceTimer, maxDurationTimer, tickTimer, selfTestTimer, pauseTimer].forEach { $0?.invalidate() }
         silenceTimer = nil
         maxDurationTimer = nil
         tickTimer = nil
         selfTestTimer = nil
+        pauseTimer = nil
     }
 
+    /// Recent dictations for re-copy. Preferences are plaintext — optional.
     private func remember(_ text: String) {
+        guard Defaults.bool(Defaults.keepHistory) else { return }
         var history = UserDefaults.standard.stringArray(forKey: Defaults.history) ?? []
         history.insert(text, at: 0)
         UserDefaults.standard.set(Array(history.prefix(20)), forKey: Defaults.history)

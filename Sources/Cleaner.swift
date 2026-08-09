@@ -11,13 +11,8 @@ import Foundation
 /// user is still speaking so cleanup feels ~1s instead of ~2s.
 enum Cleaner {
 
-    /// Fast non-reasoning models first (upstream 0.6.0 + our earlier picks).
-    private static let models = [
-        "grok-4.20-0309-non-reasoning",
-        "grok-4-1-fast-non-reasoning",
-        "grok-4-1-fast",
-        "grok-3-mini",
-    ]
+    /// Single fast non-reasoning model — no fallback chain (keeps cleanup snappy).
+    private static let model = "grok-4.20-0309-non-reasoning"
 
     private static let endpoint = URL(string: "https://api.x.ai/v1/chat/completions")!
 
@@ -86,7 +81,7 @@ enum Cleaner {
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try? JSONSerialization.data(withJSONObject: [
-            "model": models[0],
+            "model": model,
             "max_tokens": 1,
             "temperature": 0,
             "messages": [["role": "user", "content": "hi"]],
@@ -138,27 +133,22 @@ enum Cleaner {
         let original = trimmed
 
         DispatchQueue.global(qos: .userInitiated).async {
-            var lastError = "cleanup failed"
-            for model in models {
-                switch request(text: original, userContent: userContent,
-                               token: token, model: model, system: system) {
-                case .cleaned(let out):
-                    // Upstream 0.6.0 safety: refuse answers/refusals/rewrites.
-                    guard resembles(original: original, candidate: out) else {
-                        lastError = "result did not resemble the original"
-                        Log.write("cleanup rejected (resemble) model=\(model)")
-                        continue
-                    }
-                    Log.write("cleanup ok model=\(model) chars \(original.count)→\(out.count)"
-                        + (vocabBlock.isEmpty ? "" : " vocab=\(Vocabulary.count())"))
-                    DispatchQueue.main.async { completion(.cleaned(out)) }
+            switch request(text: original, userContent: userContent,
+                           token: token, model: model, system: system) {
+            case .cleaned(let out):
+                // One shot: if it rewrites too hard, paste raw — no second model.
+                guard resembles(original: original, candidate: out) else {
+                    Log.write("cleanup rejected (resemble) model=\(model) — using raw")
+                    DispatchQueue.main.async { completion(.failed("result did not resemble the original")) }
                     return
-                case .failed(let message):
-                    lastError = message
-                    Log.write("cleanup fail model=\(model): \(message)")
                 }
+                Log.write("cleanup ok model=\(model) chars \(original.count)→\(out.count)"
+                    + (vocabBlock.isEmpty ? "" : " vocab=\(Vocabulary.count())"))
+                DispatchQueue.main.async { completion(.cleaned(out)) }
+            case .failed(let message):
+                Log.write("cleanup fail model=\(model): \(message)")
+                DispatchQueue.main.async { completion(.failed(message)) }
             }
-            DispatchQueue.main.async { completion(.failed(lastError)) }
         }
     }
 

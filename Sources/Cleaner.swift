@@ -11,8 +11,8 @@ import Foundation
 /// user is still speaking so cleanup feels ~1s instead of ~2s.
 enum Cleaner {
 
-    /// Single fast non-reasoning model — no fallback chain (keeps cleanup snappy).
-    private static let model = "grok-4.20-0309-non-reasoning"
+    /// Original fast cleanup model (snappier than 4.20 in practice for this path).
+    private static let model = "grok-4-1-fast-non-reasoning"
 
     private static let endpoint = URL(string: "https://api.x.ai/v1/chat/completions")!
 
@@ -87,13 +87,6 @@ enum Cleaner {
             "messages": [["role": "user", "content": "hi"]],
         ])
         session.dataTask(with: request) { _, _, _ in }.resume()
-    }
-
-    /// Fire a keep-alive if we still have a Grok session. Safe to call often;
-    /// one tiny completion request, no logging of tokens.
-    static func warmIfPossible() {
-        guard let token = Auth.load()?.token, !token.isEmpty else { return }
-        warm(token: token)
     }
 
     /// OpenWhispr-style user payload: tags + trailing output contract.

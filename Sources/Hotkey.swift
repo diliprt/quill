@@ -121,6 +121,8 @@ private final class TriggerBinding {
     var holdArmed = false
     var holdActive = false
     var holdStartWork: DispatchWorkItem?
+    var holdStartedAt: CFTimeInterval = 0
+    var chordPoll: Timer?
     var f5HoldDown = false
 
     init(lane: DictationLane, trigger: Trigger) {
@@ -131,8 +133,11 @@ private final class TriggerBinding {
     func resetHold() {
         holdStartWork?.cancel()
         holdStartWork = nil
+        chordPoll?.invalidate()
+        chordPoll = nil
         holdArmed = false
         holdActive = false
+        holdStartedAt = 0
         f5HoldDown = false
         pressedAt = 0
     }
@@ -140,7 +145,10 @@ private final class TriggerBinding {
     func cancelHoldArm() {
         holdStartWork?.cancel()
         holdStartWork = nil
+        chordPoll?.invalidate()
+        chordPoll = nil
         holdArmed = false
+        // keep holdActive — arm cancel alone doesn't end a live hold
         pressedAt = 0
     }
 }
@@ -158,7 +166,12 @@ final class DoubleTapRightCommand {
     private let window: CFTimeInterval = 0.42
     private static let f5KeyCode: Int64 = 96
     private static let modifierKeyCodes: Set<Int64> = [54, 55, 56, 57, 58, 59, 60, 61, 62, 63]
-    private let holdStartDelay: CFTimeInterval = 0.12
+    /// How long the bare trigger must be held before dictation starts.
+    /// Short taps and Control/Fn chords must never fire — 0.12s was too easy
+    /// to hit by accident and stole ⌃C / ⌃-shortcuts.
+    private let holdStartDelay: CFTimeInterval = 0.32
+    /// After hold starts, release sooner than this is treated as accidental (cancel).
+    private let minHoldAfterStart: CFTimeInterval = 0.18
     private let tapMaxHold: CFTimeInterval = 0.35
 
     private var tap: CFMachPort?
@@ -215,6 +228,8 @@ final class DoubleTapRightCommand {
     var onTrigger: (DictationLane) -> Void = { _ in }
     var onHoldStart: (DictationLane) -> Void = { _ in }
     var onHoldEnd: (DictationLane) -> Void = { _ in }
+    /// Hold was aborted (chord / accidental short press) — discard, don't insert.
+    var onHoldCancel: (DictationLane) -> Void = { _ in }
     var onFirstEvent: () -> Void = {}
 
     var onClickAnywhere: (CGPoint) -> Void = { _ in }
@@ -343,14 +358,23 @@ final class DoubleTapRightCommand {
     private func armHoldStart(_ binding: TriggerBinding) {
         binding.cancelHoldArm()
         binding.holdArmed = true
+        binding.holdActive = false
+        binding.holdStartedAt = 0
         binding.pressedAt = CACurrentMediaTime()
         binding.activityAtPress = Self.activityCounter()
         binding.sawKeyDownSinceTap = false
 
+        // Poll for chords while waiting: keyDown may not reach us without Input
+        // Monitoring, but activity counters still move when ⌃C is pressed.
+        binding.chordPoll?.invalidate()
+        binding.chordPoll = Timer.scheduledTimer(withTimeInterval: 0.04, repeats: true) { [weak self, weak binding] _ in
+            guard let self, let binding else { return }
+            self.pollHoldChord(binding)
+        }
+
         let work = DispatchWorkItem { [weak self, weak binding] in
             guard let self, let binding, binding.holdArmed, self.holdToTalk else { return }
-            let activityNow = Self.activityCounter()
-            if activityNow != binding.activityAtPress || binding.sawKeyDownSinceTap {
+            if self.holdIsChorded(binding) {
                 if self.debugKeys {
                     Log.write("    [keys] hold arm aborted (\(binding.lane.rawValue)) — chord/activity")
                 }
@@ -361,20 +385,101 @@ final class DoubleTapRightCommand {
                 binding.cancelHoldArm()
                 return
             }
+            // Still bare? No other modifiers joining the chord.
+            guard !self.extraModifiersDown(beyond: binding) else {
+                binding.cancelHoldArm()
+                return
+            }
             binding.holdArmed = false
             binding.holdActive = true
+            binding.holdStartedAt = CACurrentMediaTime()
+            binding.chordPoll?.invalidate()
+            // Keep polling while active so a late chord cancels the session.
+            binding.chordPoll = Timer.scheduledTimer(withTimeInterval: 0.04, repeats: true) { [weak self, weak binding] _ in
+                guard let self, let binding, binding.holdActive else { return }
+                self.pollHoldChord(binding)
+            }
             if self.debugKeys { Log.write("    [keys] hold START \(binding.lane.rawValue)") }
+            Log.write("hold armed → start after \(String(format: "%.2f", self.holdStartDelay))s (\(binding.lane.rawValue))")
             self.onHoldStart(binding.lane)
         }
         binding.holdStartWork = work
         DispatchQueue.main.asyncAfter(deadline: .now() + holdStartDelay, execute: work)
     }
 
+    private func holdIsChorded(_ binding: TriggerBinding) -> Bool {
+        if binding.sawKeyDownSinceTap { return true }
+        if Self.activityCounter() != binding.activityAtPress { return true }
+        if extraModifiersDown(beyond: binding) { return true }
+        return false
+    }
+
+    /// Any modifier flag that isn't part of this trigger's bare press.
+    private func extraModifiersDown(beyond binding: TriggerBinding) -> Bool {
+        let flags = CGEventSource.flagsState(.combinedSessionState)
+        let allowed: CGEventFlags
+        if let spec = binding.trigger.modifier {
+            allowed = spec.flag
+        } else {
+            allowed = []
+        }
+        let interesting: CGEventFlags = [.maskCommand, .maskControl, .maskAlternate, .maskShift, .maskSecondaryFn]
+        let extra = flags.intersection(interesting).subtracting(allowed)
+        return !extra.isEmpty
+    }
+
+    private func pollHoldChord(_ binding: TriggerBinding) {
+        guard holdToTalk else { return }
+        if binding.holdArmed {
+            if holdIsChorded(binding) || !triggerKeyIsDown(binding) {
+                if debugKeys { Log.write("    [keys] hold arm cancelled mid-wait (\(binding.lane.rawValue))") }
+                binding.cancelHoldArm()
+            }
+            return
+        }
+        if binding.holdActive, holdIsChorded(binding) {
+            // Late chord after hold started (e.g. hold ⌃ then press C) — abort.
+            Log.write("hold cancelled — chord while active (\(binding.lane.rawValue))")
+            let lane = binding.lane
+            binding.resetHold()
+            DispatchQueue.main.async { [weak self] in self?.onHoldCancel(lane) }
+        }
+    }
+
     private func finishHoldIfActive(_ binding: TriggerBinding) {
-        binding.cancelHoldArm()
-        guard binding.holdActive else { return }
+        let wasActive = binding.holdActive
+        let startedAt = binding.holdStartedAt
+        let pressedAt = binding.pressedAt
+        binding.chordPoll?.invalidate()
+        binding.chordPoll = nil
+        binding.holdStartWork?.cancel()
+        binding.holdStartWork = nil
+        binding.holdArmed = false
+
+        guard wasActive else {
+            // Released before hold delay — treat as tap / nothing; do not start.
+            binding.holdActive = false
+            binding.pressedAt = 0
+            return
+        }
+
         binding.holdActive = false
+        let now = CACurrentMediaTime()
+        let heldAfterStart = startedAt > 0 ? now - startedAt : 0
+        let totalPress = pressedAt > 0 ? now - pressedAt : heldAfterStart
+        // Accidental blip: started then released almost immediately.
+        if heldAfterStart < minHoldAfterStart {
+            Log.write("hold cancelled — too short (\(String(format: "%.2f", totalPress))s press, \(String(format: "%.2f", heldAfterStart))s active)")
+            binding.holdStartedAt = 0
+            binding.pressedAt = 0
+            let lane = binding.lane
+            DispatchQueue.main.async { [weak self] in self?.onHoldCancel(lane) }
+            return
+        }
+
         if debugKeys { Log.write("    [keys] hold END \(binding.lane.rawValue)") }
+        binding.holdStartedAt = 0
+        binding.pressedAt = 0
         let lane = binding.lane
         DispatchQueue.main.async { [weak self] in self?.onHoldEnd(lane) }
     }
@@ -433,11 +538,19 @@ final class DoubleTapRightCommand {
                 return true
             }
 
-            if debugKeys { Log.write("    [keys] keyDown code=\(code) → invalidating taps") }
+            if debugKeys { Log.write("    [keys] keyDown code=\(code) → invalidating taps/holds") }
             for b in bindings {
                 b.sawKeyDownSinceTap = true
                 b.lastTapAt = 0
-                if b.holdArmed { b.cancelHoldArm() }
+                if b.holdArmed {
+                    b.cancelHoldArm()
+                } else if b.holdActive, holdToTalk {
+                    // Chord while holding the trigger (⌃ then C): cancel dictation.
+                    Log.write("hold cancelled — keyDown while active (\(b.lane.rawValue))")
+                    let lane = b.lane
+                    b.resetHold()
+                    DispatchQueue.main.async { [weak self] in self?.onHoldCancel(lane) }
+                }
             }
             return false
         }
@@ -452,12 +565,20 @@ final class DoubleTapRightCommand {
             guard let spec = b.trigger.modifier else { return false }
             return spec.keyCodes.contains(code)
         }) else {
-            // Foreign modifier — chord for any armed binding.
+            // Foreign modifier — chord for any armed/active hold.
             if Self.modifierKeyCodes.contains(code), !flags.isEmpty {
                 for b in bindings {
                     b.lastTapAt = 0
-                    b.pressedAt = 0
-                    if b.holdArmed { b.cancelHoldArm() }
+                    if b.holdArmed {
+                        b.cancelHoldArm()
+                    } else if b.holdActive, holdToTalk {
+                        Log.write("hold cancelled — other modifier (\(b.lane.rawValue))")
+                        let lane = b.lane
+                        b.resetHold()
+                        DispatchQueue.main.async { [weak self] in self?.onHoldCancel(lane) }
+                    } else {
+                        b.pressedAt = 0
+                    }
                 }
             }
             return false

@@ -201,9 +201,22 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         hud.install()
 
         applyTriggersAndGesture()
-        hotkey.onTrigger = { [weak self] lane in self?.toggle(lane: lane) }
+        // Hold mode only fires onHold*; onTrigger is for tap modes / pill / menu.
+        hotkey.onTrigger = { [weak self] lane in
+            guard let self else { return }
+            // Never toggle from a "tap" while hold-to-talk is the active gesture.
+            guard Defaults.currentGesture != .hold else {
+                Log.write("ignore tap trigger — hold-only mode")
+                return
+            }
+            self.toggle(lane: lane)
+        }
         hotkey.onHoldStart = { [weak self] lane in self?.startHoldSession(lane: lane) }
         hotkey.onHoldEnd = { [weak self] lane in self?.endHoldSession(lane: lane) }
+        hotkey.onHoldCancel = { [weak self] _ in
+            // Accidental short press or chord — discard, don't insert.
+            self?.cancelSession()
+        }
         hotkey.onClickAnywhere = { [weak self] point in self?.handleClickAnywhere(at: point) }
         hotkey.onCancel = { [weak self] in self?.cancelSession() }
 
@@ -276,8 +289,12 @@ final class QuillApp: NSObject, NSApplicationDelegate {
 
     private func applyTriggersAndGesture() {
         let mode = Defaults.currentGesture
+        // Hold-only: never enable single/double tap paths that fire on key release.
         hotkey.holdToTalk = (mode == .hold)
         hotkey.singleTap = (mode == .single)
+        if mode == .hold {
+            hotkey.singleTap = false
+        }
         hotkey.trigger = Defaults.currentTrigger
         hotkey.smartTrigger = Defaults.cleanupIsOn ? Defaults.smartTrigger : nil
 

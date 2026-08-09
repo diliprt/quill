@@ -16,14 +16,30 @@ enum Cleaner {
 
     private static let endpoint = URL(string: "https://api.x.ai/v1/chat/completions")!
 
-    /// Hard wall for the cleanup call. Exceeded → fail → paste raw (P1).
-    private static let hardTimeout: TimeInterval = 1.5
+    /// Floor / ceiling for the cleanup wait. Short phrases stay snappy; long
+    /// rants get more headroom (model output time scales with transcript length).
+    private static let minTimeout: TimeInterval = 1.5
+    private static let maxTimeout: TimeInterval = 8.0
+    /// Roughly +1s of budget per this many characters of transcript.
+    private static let charsPerExtraSecond: Double = 350
+
+    /// How long to wait for Grok cleanup before pasting raw.
+    ///
+    /// Scales with transcript length so a 2–3 minute smart dictation is not
+    /// cut off at 1.5s, while short “clean this sentence” stays fast.
+    /// Examples (approx): 50 chars → 1.6s · 800 chars (~1 min) → 3.8s ·
+    /// 2000 chars (~2.5 min) → 7.2s · longer → capped at 8s.
+    static func budgetSeconds(for text: String) -> TimeInterval {
+        let n = max(text.trimmingCharacters(in: .whitespacesAndNewlines).count, 1)
+        let scaled = minTimeout + Double(n) / charsPerExtraSecond
+        return min(maxTimeout, max(minTimeout, scaled))
+    }
 
     /// Shared session so TLS stays warm across dictations (upstream 0.6.0 idea).
     private static let session: URLSession = {
         let config = URLSessionConfiguration.default
-        // Slightly above hardTimeout so the semaphore usually wins and cancels cleanly.
-        config.timeoutIntervalForRequest = 2
+        // Per-request timeout is set from budgetSeconds; this is the outer ceiling.
+        config.timeoutIntervalForRequest = maxTimeout + 1
         config.waitsForConnectivity = false
         return URLSession(configuration: config)
     }()
@@ -129,9 +145,12 @@ enum Cleaner {
         let userContent = wrapTranscript(trimmed)
         let original = trimmed
 
+        let budget = budgetSeconds(for: original)
+        Log.write("cleanup budget \(String(format: "%.1f", budget))s for \(original.count) chars")
+
         DispatchQueue.global(qos: .userInitiated).async {
             switch request(text: original, userContent: userContent,
-                           token: token, model: model, system: system) {
+                           token: token, model: model, system: system, budget: budget) {
             case .cleaned(let out):
                 // One shot: if it rewrites too hard, paste raw — no second model.
                 guard resembles(original: original, candidate: out) else {
@@ -150,7 +169,8 @@ enum Cleaner {
     }
 
     private static func request(text original: String, userContent: String,
-                                token: String, model: String, system: String) -> Outcome {
+                                token: String, model: String, system: String,
+                                budget: TimeInterval) -> Outcome {
         let body: [String: Any] = [
             "model": model,
             "temperature": 0,
@@ -168,10 +188,11 @@ enum Cleaner {
         var request = URLRequest(url: endpoint)
         request.httpMethod = "POST"
         request.httpBody = data
-        request.timeoutInterval = hardTimeout + 0.4
+        request.timeoutInterval = budget + 0.5
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
 
+        let budgetLabel = String(format: "%.1f", budget)
         let semaphore = DispatchSemaphore(value: 0)
         var result: Outcome = .failed("no response")
         let task = session.dataTask(with: request) { data, response, error in
@@ -179,7 +200,7 @@ enum Cleaner {
             if let error {
                 let ns = error as NSError
                 if ns.domain == NSURLErrorDomain, ns.code == NSURLErrorCancelled {
-                    result = .failed("cleanup timed out (\(hardTimeout)s)")
+                    result = .failed("cleanup timed out (\(budgetLabel)s)")
                 } else {
                     result = .failed(error.localizedDescription)
                 }
@@ -217,11 +238,11 @@ enum Cleaner {
             result = .cleaned(cleaned)
         }
         task.resume()
-        // P1: never block insert on a slow cleanup — cancel and fall back to raw.
-        if semaphore.wait(timeout: .now() + hardTimeout) == .timedOut {
+        // Length-scaled budget: cancel and fall back to raw if still pending.
+        if semaphore.wait(timeout: .now() + budget) == .timedOut {
             task.cancel()
-            Log.write("cleanup hard timeout \(hardTimeout)s model=\(model)")
-            return .failed("cleanup timed out (\(hardTimeout)s)")
+            Log.write("cleanup hard timeout \(budgetLabel)s model=\(model) chars=\(original.count)")
+            return .failed("cleanup timed out (\(budgetLabel)s)")
         }
         return result
     }

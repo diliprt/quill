@@ -5,7 +5,7 @@
 > **This repository** ([diliprt/quill](https://github.com/diliprt/quill)) is a public fork of
 > [xfreeze2/quill](https://github.com/xfreeze2/quill). Upstream behaviour is preserved; this
 > fork adds hold-to-talk, dual-key Grok cleanup, and a local personal dictionary.
-> Current fork build: **0.7.0**.
+> Current fork build: **0.7.1**.
 
 Tap a key, talk, then click into whatever window you want the words in. They appear there — at
 the end of what's already written, without touching your clipboard.
@@ -24,7 +24,7 @@ Additions on top of upstream (menu-bar right-click → settings):
 | **Hold to talk** | Push-to-talk: press and hold the trigger to listen, release to stop and insert. Prefer **not** using Control (conflicts with Grok Build `⌃…` shortcuts). |
 | **Early arm (P0)** | Mic + HUD start on key-down; session only *commits* after the hold delay — first words aren’t lost. Short release / chords discard. |
 | **Dual triggers** | **Simple key** — raw STT only. **Smart key** — STT → cloud Grok cleanup → insert. |
-| **Clean up with Grok** | Toggle + smart-key picker. See [Cleanup model & latency notes](#cleanup-model--latency-notes) below. **1.5s hard timeout → paste raw** (P1). |
+| **Clean up with Grok** | Toggle + smart-key picker. See [Cleanup model & latency notes](#cleanup-model--latency-notes) below. **Length-scaled timeout → paste raw** (P1). |
 | **Personal dictionary** | Local-only unique terms + AI/harness seed; learns from dictation, cleanup pairs, and post-paste edits. File: `~/Library/Application Support/com.freeze.quill/vocabulary.json`. Soft LLM guidance only (hard local alias replace = P2, not shipped). |
 
 ### Typical layout (example)
@@ -51,7 +51,7 @@ Mic + listening HUD arm on **key-down**; the delay only decides commit vs discar
 | Setting | Choice | Why |
 |---------|--------|-----|
 | **Cleanup model** | `grok-4-1-fast-non-reasoning` | Felt **faster and cleaner** in real use than `grok-4.20-0309-non-reasoning`. |
-| **Hard timeout** | **1.5s → paste raw** (P1) | 🌐 never multi-second stalls; Cleaner + main budget. |
+| **Hard timeout** | **Length-scaled 1.5–8s → paste raw** (P1) | Short phrases stay snappy; long rants get more headroom. |
 | **Keep-warm pings** | **Off** (disabled) | Background / periodic warm-ups removed; test without extra API noise. |
 | **Model fallbacks** | **Single model only** | No multi-model retry chain (retries added latency). |
 | **Prompt style** | Light corrector | Grammar / caps / punctuation / obvious typos — not full rephrase. |
@@ -64,11 +64,20 @@ Mic + listening HUD arm on **key-down**; the delay only decides commit vs discar
 3. Multi-model fallbacks on reject (extra round-trips).
 4. Hold delay before mic start (lost first words / late HUD) — fixed by early arm in 0.7.0.
 
-**Raw vs cleaned baseline from local logs:** raw insert ~**0.3–0.4s** after stop; good cleaned path ~**0.7–1.0s**; slow path capped at **1.5s** then raw.
+**Raw vs cleaned baseline from local logs:** raw insert ~**0.3–0.4s** after stop; good short cleaned path ~**0.7–1.0s**. Cleanup wait scales with transcript length (`budgetSeconds`): floor **1.5s**, roughly **+1s per 350 characters**, ceiling **8s**, then paste raw.
 
-**Code:** `Sources/Cleaner.swift` (`model` + `hardTimeout`), `Sources/Hotkey.swift` (arm/commit delays). Do not re-enable keep-warm or switch to 4.20 without a timed A/B on this machine.
+| Transcript size (approx) | Cleanup budget |
+|--------------------------|----------------|
+| Short phrase (~50 chars) | ~1.6s |
+| ~1 min talk (~800 chars) | ~3.8s |
+| ~2.5 min talk (~2000 chars) | ~7.2s |
+| Longer | capped at **8s** |
 
-If `grok-4-1-fast-non-reasoning` is unavailable on the account, cleanup fails and the app pastes raw — check `~/Library/Logs/Quill.log` for `cleanup ok model=` / `cleanup fail` / `cleanup hard timeout`.
+**Dual-key intent:** **Simple key** (e.g. Right ⌘) = paste as spoken, no wait. **Smart key** (e.g. 🌐) = wait for light Grok cleanup (up to the budget above). Use simple when you want instant; smart when polish is worth the wait.
+
+**Code:** `Sources/Cleaner.swift` (`model` + `budgetSeconds(for:)`), `Sources/Hotkey.swift` (arm/commit delays). Do not re-enable keep-warm or switch to 4.20 without a timed A/B on this machine.
+
+If `grok-4-1-fast-non-reasoning` is unavailable on the account, cleanup fails and the app pastes raw — check `~/Library/Logs/Quill.log` for `cleanup budget` / `cleanup ok model=` / `cleanup fail` / `cleanup hard timeout`.
 
 ### Build this fork from source
 

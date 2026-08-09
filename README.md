@@ -5,7 +5,7 @@
 > **This repository** ([diliprt/quill](https://github.com/diliprt/quill)) is a public fork of
 > [xfreeze2/quill](https://github.com/xfreeze2/quill). Upstream behaviour is preserved; this
 > fork adds hold-to-talk, dual-key Grok cleanup, and a local personal dictionary.
-> Current fork build: **0.7.1**.
+> Current fork build: **0.7.2**.
 
 Tap a key, talk, then click into whatever window you want the words in. They appear there — at
 the end of what's already written, without touching your clipboard.
@@ -25,6 +25,7 @@ Additions on top of upstream (menu-bar right-click → settings):
 | **Early arm (P0)** | Mic + HUD start on key-down; session only *commits* after the hold delay — first words aren’t lost. Short release / chords discard. |
 | **Dual triggers** | **Simple key** — raw STT only. **Smart key** — STT → cloud Grok cleanup → insert. |
 | **Clean up with Grok** | Toggle + smart-key picker. See [Cleanup model & latency notes](#cleanup-model--latency-notes) below. **Length-scaled timeout → paste raw** (P1). |
+| **Nearby text for cleanup (P4)** | Opt-in under **Clean up with Grok**. Smart path may use focused field / window title / selection (not passwords) for name spellings only. Default **off** for A/B. |
 | **Personal dictionary** | Local-only unique terms + AI/harness seed; learns from dictation, cleanup pairs, and post-paste edits. File: `~/Library/Application Support/com.freeze.quill/vocabulary.json`. Soft LLM guidance only (hard local alias replace = P2, not shipped). |
 
 ### Typical layout (example)
@@ -74,6 +75,23 @@ Mic + listening HUD arm on **key-down**; the delay only decides commit vs discar
 | Longer | capped at **8s** |
 
 **Dual-key intent:** **Simple key** (e.g. Right ⌘) = paste as spoken, no wait. **Smart key** (e.g. 🌐) = wait for light Grok cleanup (up to the budget above). Use simple when you want instant; smart when polish is worth the wait.
+
+### Nearby text for cleanup (P4 / P4b) — A/B test
+
+Menu: **Quill ▸ Clean up with Grok ▸ Use nearby text for cleanup** (requires cleaned dictation on).
+
+| | Off (default) | On |
+|--|---------------|-----|
+| Behaviour | Smart cleanup as in 0.7.1 | Same + AX snapshot of app, window title, field near caret, selection |
+| Passwords | n/a | Secure/password fields **never** sent |
+| Logs | `cleanup context: skipped` / `context=off` | `cleanup context: app=… fieldChars=N` (no field body) + `cleanup ok … Nms context=on` |
+
+**How to compare speed/quality**
+
+1. Leave toggle **off**. Dictate a short smart phrase into a note that already contains a rare name (e.g. type `P2` in the field, then dictate “we can ignore pito”).  
+2. Check `~/Library/Logs/Quill.log` for `cleanup ok … Nms context=off`.  
+3. Turn toggle **on**, repeat the same test.  
+4. Compare `Nms` and whether spellings match the field.
 
 **Code:** `Sources/Cleaner.swift` (`model` + `budgetSeconds(for:)`), `Sources/Hotkey.swift` (arm/commit delays). Do not re-enable keep-warm or switch to 4.20 without a timed A/B on this machine.
 

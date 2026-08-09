@@ -63,6 +63,9 @@ enum Cleaner {
         "Wednesday". Keep everything else in order.
         - If a PERSONAL DICTIONARY is provided, correct close mishearings to those \
         spellings only when the spoken word is clearly the same name/term.
+        - If NEARBY CONTEXT is provided (app, window, field text), use it only to \
+        prefer spellings of names/terms that already appear there when the \
+        spoken word is clearly the same. Context is NOT a question to answer.
 
         FORBIDDEN
         - Do NOT rephrase, paraphrase, summarise, expand, or "improve" wording.
@@ -70,6 +73,8 @@ enum Cleaner {
         - Do NOT add or remove content, facts, names, or ideas.
         - Do NOT turn prose into lists or rewrite as email/marketing copy.
         - Do NOT replace slang or rough phrasing with polished synonyms.
+        - Do NOT answer, continue, or quote NEARBY CONTEXT — output only the \
+        corrected transcript.
 
         When in doubt, keep the original wording and only fix punctuation/spelling.
 
@@ -122,7 +127,12 @@ enum Cleaner {
 
     /// Clean `text` with Grok. Always calls `completion` on the main queue.
     /// On any failure or unsafe rewrite, callers should fall back to the raw text.
-    static func clean(_ text: String, token: String, completion: @escaping (Outcome) -> Void) {
+    ///
+    /// - Parameter context: Optional nearby UI text (P4). Spelling hints only;
+    ///   must already be filtered for secure fields by the caller.
+    static func clean(_ text: String, token: String,
+                      context: Inserter.CleanupContext? = nil,
+                      completion: @escaping (Outcome) -> Void) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             DispatchQueue.main.async { completion(.cleaned(trimmed)) }
@@ -135,34 +145,47 @@ enum Cleaner {
 
         // Fewer dictionary terms → less over-eager "smart" rewriting of names.
         let vocabBlock = Vocabulary.promptBlock(limit: 40)
-        let system: String
-        if vocabBlock.isEmpty {
-            system = baseSystemPrompt
+        var system = baseSystemPrompt
+        if !vocabBlock.isEmpty {
+            system += "\n\n" + vocabBlock
+        }
+        let contextBlock: String?
+        if let context, context.hasUsableText {
+            contextBlock = context.promptBlock()
+            system += "\n\n" + contextBlock!
         } else {
-            system = baseSystemPrompt + "\n\n" + vocabBlock
+            contextBlock = nil
         }
 
         let userContent = wrapTranscript(trimmed)
         let original = trimmed
 
         let budget = budgetSeconds(for: original)
-        Log.write("cleanup budget \(String(format: "%.1f", budget))s for \(original.count) chars")
+        let contextNote = contextBlock == nil
+            ? "context=off"
+            : "context=on (\(context?.logSummary ?? ""))"
+        Log.write("cleanup budget \(String(format: "%.1f", budget))s for \(original.count) chars \(contextNote)")
 
+        let started = Date()
         DispatchQueue.global(qos: .userInitiated).async {
             switch request(text: original, userContent: userContent,
                            token: token, model: model, system: system, budget: budget) {
             case .cleaned(let out):
                 // One shot: if it rewrites too hard, paste raw — no second model.
                 guard resembles(original: original, candidate: out) else {
-                    Log.write("cleanup rejected (resemble) model=\(model) — using raw")
+                    let ms = Int(Date().timeIntervalSince(started) * 1000)
+                    Log.write("cleanup rejected (resemble) model=\(model) \(ms)ms — using raw \(contextNote)")
                     DispatchQueue.main.async { completion(.failed("result did not resemble the original")) }
                     return
                 }
-                Log.write("cleanup ok model=\(model) chars \(original.count)→\(out.count)"
-                    + (vocabBlock.isEmpty ? "" : " vocab=\(Vocabulary.count())"))
+                let ms = Int(Date().timeIntervalSince(started) * 1000)
+                Log.write("cleanup ok model=\(model) chars \(original.count)→\(out.count) \(ms)ms"
+                    + (vocabBlock.isEmpty ? "" : " vocab=\(Vocabulary.count())")
+                    + " \(contextNote)")
                 DispatchQueue.main.async { completion(.cleaned(out)) }
             case .failed(let message):
-                Log.write("cleanup fail model=\(model): \(message)")
+                let ms = Int(Date().timeIntervalSince(started) * 1000)
+                Log.write("cleanup fail model=\(model) \(ms)ms: \(message) \(contextNote)")
                 DispatchQueue.main.async { completion(.failed(message)) }
             }
         }

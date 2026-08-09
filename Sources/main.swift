@@ -26,6 +26,9 @@ enum Defaults {
     static let cleanupEnabled = "cleanupEnabled"
     /// Key used for smart dictation (must differ from `trigger`).
     static let cleanupTrigger = "cleanupTrigger"
+    /// P4: inject nearby field/window text into smart cleanup (spelling only).
+    /// Default off so you can A/B latency and quality before/after enabling.
+    static let cleanupNearbyContext = "cleanupNearbyContext"
     /// Learn unique personal terms into the local vocabulary file.
     static let vocabLearning = "vocabLearning"
     /// After paste, re-read the field and learn from hand edits.
@@ -49,11 +52,15 @@ enum Defaults {
             pauseSeconds: 5.0,
             cleanupEnabled: false,
             cleanupTrigger: Trigger.rightOption.rawValue,
+            // Off until you enable for A/B (before = off, after = on).
+            cleanupNearbyContext: false,
             vocabLearning: true,
             vocabLearnFromEdits: true,
             keepHistory: true,
         ])
     }
+
+    static var nearbyContextIsOn: Bool { bool(cleanupNearbyContext) }
 
     static func bool(_ key: String) -> Bool { UserDefaults.standard.bool(forKey: key) }
 
@@ -426,6 +433,18 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         cleanupMenu.autoenablesItems = false
         addToggle(to: cleanupMenu, title: "Enable cleaned dictation key",
                   key: Defaults.cleanupEnabled, action: #selector(toggleCleanup))
+        let nearbyItem = NSMenuItem(
+            title: "Use nearby text for cleanup",
+            action: #selector(toggleNearbyContext),
+            keyEquivalent: ""
+        )
+        nearbyItem.target = self
+        nearbyItem.state = Defaults.nearbyContextIsOn ? .on : .off
+        nearbyItem.isEnabled = Defaults.cleanupIsOn
+        nearbyItem.toolTip = "When on, smart cleanup may read the focused field, "
+            + "window title, and selection (not passwords) to fix name spellings. "
+            + "Off = previous behaviour. Toggle anytime for A/B timing."
+        cleanupMenu.addItem(nearbyItem)
         cleanupMenu.addItem(.separator())
         let smartKeyHeader = NSMenuItem(title: "Smart key (Grok cleanup)", action: nil, keyEquivalent: "")
         smartKeyHeader.isEnabled = false
@@ -693,6 +712,17 @@ final class QuillApp: NSObject, NSApplicationDelegate {
             hud.apply(.notice("Cleaned dictation off — only simple key active"))
         }
         hud.collapse(after: 2.8)
+    }
+
+    @objc private func toggleNearbyContext() {
+        Defaults.flip(Defaults.cleanupNearbyContext)
+        let on = Defaults.nearbyContextIsOn
+        Log.write("cleanup nearby context = \(on)")
+        buildStatusItem()
+        hud.apply(.notice(on
+            ? "Nearby text for cleanup ON — smart key may use field/window for spellings"
+            : "Nearby text for cleanup OFF — smart cleanup as before"))
+        hud.collapse(after: 2.5)
     }
 
     @objc private func setGestureMode(_ sender: NSMenuItem) {
@@ -1357,12 +1387,21 @@ final class QuillApp: NSObject, NSApplicationDelegate {
 
         if wantsCleanup, let creds = Auth.load() {
             let vocabN = Vocabulary.count()
+            // P4: optional nearby UI context for spelling (toggle; default off for A/B).
+            let useContext = Defaults.nearbyContextIsOn
+            let context: Inserter.CleanupContext? = useContext
+                ? Inserter.captureCleanupContext(priorSelection: capturedSelection)
+                : nil
+            if !useContext {
+                Log.write("cleanup context: skipped (toggle off)")
+            }
             // Length-scaled budget (short phrases stay snappy; long rants get up to ~8s).
             let cleanupBudget = Cleaner.budgetSeconds(for: trimmed)
             let budgetLabel = String(format: "%.1f", cleanupBudget)
-            hud.flashTarget(vocabN > 0
-                ? "cleaning with Grok… (\(vocabN) terms, ≤\(budgetLabel)s)"
-                : "cleaning with Grok… (≤\(budgetLabel)s)", for: cleanupBudget + 0.5)
+            var flash = "cleaning with Grok… (≤\(budgetLabel)s)"
+            if vocabN > 0 { flash = "cleaning with Grok… (\(vocabN) terms, ≤\(budgetLabel)s)" }
+            if useContext { flash += " · context" }
+            hud.flashTarget(flash, for: cleanupBudget + 0.5)
             hud.update(text: trimmed)
             var finished = false
             let apply: (Cleaner.Outcome) -> Void = { [weak self] outcome in
@@ -1385,7 +1424,7 @@ final class QuillApp: NSObject, NSApplicationDelegate {
                 apply(.failed("cleanup timed out (\(budgetLabel)s budget)"))
             }
             DispatchQueue.main.asyncAfter(deadline: .now() + cleanupBudget, execute: budgetWork)
-            Cleaner.clean(trimmed, token: creds.token) { outcome in
+            Cleaner.clean(trimmed, token: creds.token, context: context) { outcome in
                 budgetWork.cancel()
                 apply(outcome)
             }

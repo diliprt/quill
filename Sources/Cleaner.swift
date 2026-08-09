@@ -77,7 +77,7 @@ enum Cleaner {
         case failed(String)
     }
 
-    /// Open the TLS connection while the user is still talking (upstream 0.6.0).
+    /// Open / refresh the TLS connection so the next cleanup is not cold.
     /// Cold requests measured ~1.9s vs ~0.8–0.9s warm.
     static func warm(token: String) {
         var request = URLRequest(url: endpoint)
@@ -92,6 +92,13 @@ enum Cleaner {
             "messages": [["role": "user", "content": "hi"]],
         ])
         session.dataTask(with: request) { _, _, _ in }.resume()
+    }
+
+    /// Fire a keep-alive if we still have a Grok session. Safe to call often;
+    /// one tiny completion request, no logging of tokens.
+    static func warmIfPossible() {
+        guard let token = Auth.load()?.token, !token.isEmpty else { return }
+        warm(token: token)
     }
 
     /// OpenWhispr-style user payload: tags + trailing output contract.

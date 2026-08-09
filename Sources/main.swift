@@ -39,7 +39,8 @@ enum Defaults {
             cornerButton: true,
             insertAtEnd: true,
             clickToInsert: true,
-            trigger: Trigger.control.rawValue,
+            // Right ⌥ by default — Control is reserved for Grok Build (⌃M, ⌃O, …).
+            trigger: Trigger.rightOption.rawValue,
             singleTap: true,
             // Default stays single-tap; hold is opt-in via the Trigger menu.
             gestureMode: GestureMode.single.rawValue,

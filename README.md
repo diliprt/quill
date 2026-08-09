@@ -5,7 +5,7 @@
 > **This repository** ([diliprt/quill](https://github.com/diliprt/quill)) is a public fork of
 > [xfreeze2/quill](https://github.com/xfreeze2/quill). Upstream behaviour is preserved; this
 > fork adds hold-to-talk, dual-key Grok cleanup, and a local personal dictionary.
-> Current fork build: **0.6.5** — our features plus selected upstream 0.7 fixes (no full rebase; BYOK not included).
+> Current fork build: **0.6.6** — hold-to-talk avoids Control/Grok shortcut clashes; cleanup is light (no meaning rewrites).
 
 Tap a key, talk, then click into whatever window you want the words in. They appear there — at
 the end of what's already written, without touching your clipboard.

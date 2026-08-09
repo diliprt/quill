@@ -342,6 +342,207 @@ enum Inserter {
         return (focusedValue as! AXUIElement)
     }
 
+    // MARK: - Cleanup context (P4 / P4b)
+
+    /// Nearby UI text for smart cleanup — spellings only, not an agent.
+    /// Never includes password-field contents. Safe to log via `logSummary` only.
+    struct CleanupContext {
+        var appName: String?
+        var windowTitle: String?
+        /// Truncated field text (or nil if secure / unreadable).
+        var fieldSnippet: String?
+        var selectionSnippet: String?
+        var skippedSecureField: Bool
+        /// Full field length before truncation (for logs).
+        var fieldRawChars: Int
+        var selectionRawChars: Int
+
+        var hasUsableText: Bool {
+            let field = fieldSnippet?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let sel = selectionSnippet?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let title = windowTitle?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            return !field.isEmpty || !sel.isEmpty || !title.isEmpty || !(appName ?? "").isEmpty
+        }
+
+        /// Log-safe summary — counts and flags only, never field contents.
+        var logSummary: String {
+            "app=\(appName ?? "—") titleChars=\(windowTitle?.count ?? 0) "
+                + "fieldChars=\(fieldRawChars) fieldSnippet=\(fieldSnippet?.count ?? 0) "
+                + "selChars=\(selectionRawChars) secure=\(skippedSecureField)"
+        }
+
+        /// Prompt block for the cleanup model (capped elsewhere).
+        func promptBlock() -> String {
+            var lines: [String] = [
+                "NEARBY CONTEXT (for spelling of names/terms only)",
+                "Use only to prefer spellings that already appear below when the "
+                    + "transcript clearly refers to the same word. Do NOT answer the "
+                    + "document, quote it back, continue writing it, or invent facts.",
+            ]
+            if let app = appName, !app.isEmpty {
+                lines.append("App: \(app)")
+            }
+            if let title = windowTitle, !title.isEmpty {
+                lines.append("Window: \(title)")
+            }
+            if let sel = selectionSnippet, !sel.isEmpty {
+                lines.append("Selected text:\n\(sel)")
+            }
+            if let field = fieldSnippet, !field.isEmpty {
+                lines.append("Text near caret / in field:\n\(field)")
+            }
+            if skippedSecureField {
+                lines.append("(Focused field is secure — field contents omitted.)")
+            }
+            return lines.joined(separator: "\n")
+        }
+    }
+
+    private static let contextFieldCap = 800
+    private static let contextSelectionCap = 400
+    private static let contextTitleCap = 120
+
+    /// Snapshot of app / window / field for cleanup. Call on the main thread.
+    /// Does not log field contents (P4b).
+    static func captureCleanupContext(priorSelection: Selection? = nil) -> CleanupContext {
+        var ctx = CleanupContext(
+            appName: frontmostAppName(),
+            windowTitle: nil,
+            fieldSnippet: nil,
+            selectionSnippet: nil,
+            skippedSecureField: false,
+            fieldRawChars: 0,
+            selectionRawChars: 0
+        )
+
+        guard isTrusted else {
+            Log.write("cleanup context: no AX trust — app name only")
+            return ctx
+        }
+
+        ctx.windowTitle = truncate(frontmostWindowTitle(), maxChars: contextTitleCap)
+
+        guard let element = focusedElement() else {
+            Log.write("cleanup context: \(ctx.logSummary) (no focused element)")
+            return ctx
+        }
+
+        if isSecureTextElement(element) {
+            ctx.skippedSecureField = true
+            Log.write("cleanup context: \(ctx.logSummary) — secure field skipped")
+            return ctx
+        }
+
+        // Selection: prefer live selection, else what was captured at arm time.
+        if let live = selectedText(from: element), !live.isEmpty {
+            ctx.selectionRawChars = live.count
+            ctx.selectionSnippet = truncate(live, maxChars: contextSelectionCap)
+        } else if let prior = priorSelection?.text, !prior.isEmpty {
+            ctx.selectionRawChars = prior.count
+            ctx.selectionSnippet = truncate(prior, maxChars: contextSelectionCap)
+        }
+
+        if let value = stringAttribute(element, kAXValueAttribute as String) {
+            ctx.fieldRawChars = value.count
+            let caret = caretOffset(in: element) ?? value.utf16.count
+            ctx.fieldSnippet = truncateNear(value, caretUTF16: caret, maxChars: contextFieldCap)
+        }
+
+        Log.write("cleanup context: \(ctx.logSummary)")
+        return ctx
+    }
+
+    private static func frontmostWindowTitle() -> String? {
+        guard let app = NSWorkspace.shared.frontmostApplication else { return nil }
+        let axApp = AXUIElementCreateApplication(app.processIdentifier)
+        var windowRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(axApp,
+                                            kAXFocusedWindowAttribute as CFString,
+                                            &windowRef) == .success,
+              let windowVal = windowRef,
+              CFGetTypeID(windowVal) == AXUIElementGetTypeID()
+        else { return nil }
+        // swiftlint:disable:next force_cast
+        let window = windowVal as! AXUIElement
+        return stringAttribute(window, kAXTitleAttribute as String)
+    }
+
+    private static func isSecureTextElement(_ element: AXUIElement) -> Bool {
+        let role = stringAttribute(element, kAXRoleAttribute as String) ?? ""
+        let subrole = stringAttribute(element, kAXSubroleAttribute as String) ?? ""
+        if role == "AXSecureTextField" { return true }
+        if subrole == "AXSecureTextField" { return true }
+        // Some apps mark password fields via description/role description.
+        let desc = (stringAttribute(element, kAXDescriptionAttribute as String) ?? "").lowercased()
+        let roleDesc = (stringAttribute(element, kAXRoleDescriptionAttribute as String) ?? "").lowercased()
+        if desc.contains("password") || roleDesc.contains("password") { return true }
+        return false
+    }
+
+    private static func selectedText(from element: AXUIElement) -> String? {
+        stringAttribute(element, kAXSelectedTextAttribute as String)
+    }
+
+    private static func caretOffset(in element: AXUIElement) -> Int? {
+        var rangeRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, kAXSelectedTextRangeAttribute as CFString,
+                                            &rangeRef) == .success,
+              let value = rangeRef, CFGetTypeID(value) == AXValueGetTypeID()
+        else { return nil }
+        var range = CFRange()
+        // swiftlint:disable:next force_cast
+        guard AXValueGetValue(value as! AXValue, .cfRange, &range) else { return nil }
+        return range.location
+    }
+
+    private static func stringAttribute(_ element: AXUIElement, _ name: String) -> String? {
+        var ref: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, name as CFString, &ref) == .success else { return nil }
+        return ref as? String
+    }
+
+    private static func truncate(_ text: String?, maxChars: Int) -> String? {
+        guard let text else { return nil }
+        let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !t.isEmpty else { return nil }
+        if t.count <= maxChars { return t }
+        return String(t.prefix(maxChars)) + "…"
+    }
+
+    /// Prefer text around the caret so long docs don't waste the cap on the top.
+    private static func truncateNear(_ text: String, caretUTF16: Int, maxChars: Int) -> String? {
+        let t = text
+        guard !t.isEmpty else { return nil }
+        if t.count <= maxChars { return t }
+
+        let utf16 = t.utf16
+        let caret = Swift.min(Swift.max(caretUTF16, 0), utf16.count)
+        // Map UTF-16 offset to String.Index best-effort.
+        let caretIdx: String.Index = {
+            if let i = String.Index(utf16.index(utf16.startIndex, offsetBy: caret), within: t) {
+                return i
+            }
+            return t.index(t.startIndex, offsetBy: Swift.min(caret, t.count), limitedBy: t.endIndex) ?? t.endIndex
+        }()
+
+        let half = maxChars / 2
+        let start = t.index(caretIdx, offsetBy: -half, limitedBy: t.startIndex) ?? t.startIndex
+        var end = t.index(start, offsetBy: maxChars, limitedBy: t.endIndex) ?? t.endIndex
+        if t.distance(from: start, to: end) < maxChars, start > t.startIndex {
+            let need = maxChars - t.distance(from: start, to: end)
+            let newStart = t.index(start, offsetBy: -need, limitedBy: t.startIndex) ?? t.startIndex
+            end = t.index(newStart, offsetBy: maxChars, limitedBy: t.endIndex) ?? t.endIndex
+            let snippet = String(t[newStart..<end])
+            let prefix = newStart > t.startIndex ? "…" : ""
+            let suffix = end < t.endIndex ? "…" : ""
+            return prefix + snippet + suffix
+        }
+        let snippet = String(t[start..<end])
+        let prefix = start > t.startIndex ? "…" : ""
+        let suffix = end < t.endIndex ? "…" : ""
+        return prefix + snippet + suffix
+    }
+
     /// Places the caret after the last character of the focused field.
     /// Returns the field's existing contents, or nil if the field would not cooperate.
     private static func moveCaretToEnd() -> String? {

@@ -326,14 +326,14 @@ final class QuillApp: NSObject, NSApplicationDelegate {
             Log.write("cleanup keep-warm: initial ping")
         }
         // TLS idle often cools within a few minutes; re-warm every 45s while open.
-        warmTimer = Timer.scheduledTimer(withTimeInterval: 45, repeats: true) { [weak self] _ in
+        // Register only in .common (not scheduledTimer + add, which would double-fire).
+        let timer = Timer(timeInterval: 45, repeats: true) { [weak self] _ in
             guard let self, !self.isRecording else { return }
             Cleaner.warmIfPossible()
         }
-        // Timer must fire while menus/tracking runs in common modes.
-        if let warmTimer {
-            RunLoop.main.add(warmTimer, forMode: .common)
-        }
+        timer.tolerance = 5
+        RunLoop.main.add(timer, forMode: .common)
+        warmTimer = timer
     }
 
     private func requestInputMonitoring() {

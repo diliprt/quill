@@ -1357,11 +1357,12 @@ final class QuillApp: NSObject, NSApplicationDelegate {
 
         if wantsCleanup, let creds = Auth.load() {
             let vocabN = Vocabulary.count()
-            // P1: hard budget so 🌐 never multi-second stalls; Cleaner also times out.
-            let cleanupBudget: TimeInterval = 1.5
+            // Length-scaled budget (short phrases stay snappy; long rants get up to ~8s).
+            let cleanupBudget = Cleaner.budgetSeconds(for: trimmed)
+            let budgetLabel = String(format: "%.1f", cleanupBudget)
             hud.flashTarget(vocabN > 0
-                ? "cleaning with Grok… (\(vocabN) personal terms)"
-                : "cleaning with Grok…", for: cleanupBudget + 0.5)
+                ? "cleaning with Grok… (\(vocabN) terms, ≤\(budgetLabel)s)"
+                : "cleaning with Grok… (≤\(budgetLabel)s)", for: cleanupBudget + 0.5)
             hud.update(text: trimmed)
             var finished = false
             let apply: (Cleaner.Outcome) -> Void = { [weak self] outcome in
@@ -1381,7 +1382,7 @@ final class QuillApp: NSObject, NSApplicationDelegate {
                 }
             }
             let budgetWork = DispatchWorkItem {
-                apply(.failed("cleanup timed out (\(cleanupBudget)s budget)"))
+                apply(.failed("cleanup timed out (\(budgetLabel)s budget)"))
             }
             DispatchQueue.main.asyncAfter(deadline: .now() + cleanupBudget, execute: budgetWork)
             Cleaner.clean(trimmed, token: creds.token) { outcome in

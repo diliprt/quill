@@ -16,10 +16,14 @@ enum Cleaner {
 
     private static let endpoint = URL(string: "https://api.x.ai/v1/chat/completions")!
 
+    /// Hard wall for the cleanup call. Exceeded → fail → paste raw (P1).
+    private static let hardTimeout: TimeInterval = 1.5
+
     /// Shared session so TLS stays warm across dictations (upstream 0.6.0 idea).
     private static let session: URLSession = {
         let config = URLSessionConfiguration.default
-        config.timeoutIntervalForRequest = 8
+        // Slightly above hardTimeout so the semaphore usually wins and cancels cleanly.
+        config.timeoutIntervalForRequest = 2
         config.waitsForConnectivity = false
         return URLSession(configuration: config)
     }()
@@ -164,7 +168,7 @@ enum Cleaner {
         var request = URLRequest(url: endpoint)
         request.httpMethod = "POST"
         request.httpBody = data
-        request.timeoutInterval = 8
+        request.timeoutInterval = hardTimeout + 0.4
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
 
@@ -173,7 +177,12 @@ enum Cleaner {
         let task = session.dataTask(with: request) { data, response, error in
             defer { semaphore.signal() }
             if let error {
-                result = .failed(error.localizedDescription)
+                let ns = error as NSError
+                if ns.domain == NSURLErrorDomain, ns.code == NSURLErrorCancelled {
+                    result = .failed("cleanup timed out (\(hardTimeout)s)")
+                } else {
+                    result = .failed(error.localizedDescription)
+                }
                 return
             }
             let code = (response as? HTTPURLResponse)?.statusCode ?? 0
@@ -208,7 +217,12 @@ enum Cleaner {
             result = .cleaned(cleaned)
         }
         task.resume()
-        _ = semaphore.wait(timeout: .now() + 10)
+        // P1: never block insert on a slow cleanup — cancel and fall back to raw.
+        if semaphore.wait(timeout: .now() + hardTimeout) == .timedOut {
+            task.cancel()
+            Log.write("cleanup hard timeout \(hardTimeout)s model=\(model)")
+            return .failed("cleanup timed out (\(hardTimeout)s)")
+        }
         return result
     }
 

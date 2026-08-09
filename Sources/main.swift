@@ -130,6 +130,8 @@ final class QuillApp: NSObject, NSApplicationDelegate {
     private var isRecording = false
     /// True when this recording was started by hold-to-talk (release will stop it).
     private var sessionFromHold = false
+    /// Hold delay elapsed — release will insert. False while only primed (P0).
+    private var holdCommitted = false
     /// This session should run Grok cleanup after STT (smart key).
     private var sessionUsesCleanup = false
     private var pendingPCM: [Data] = []
@@ -212,14 +214,16 @@ final class QuillApp: NSObject, NSApplicationDelegate {
             }
             self.toggle(lane: lane)
         }
-        hotkey.onHoldStart = { [weak self] lane in self?.startHoldSession(lane: lane) }
+        // P0: prime mic/HUD on key-down; commit only after hold delay.
+        hotkey.onHoldArm = { [weak self] lane in self?.armHoldSession(lane: lane) }
+        hotkey.onHoldStart = { [weak self] lane in self?.commitHoldSession(lane: lane) }
         hotkey.onHoldEnd = { [weak self] lane in self?.endHoldSession(lane: lane) }
         hotkey.onHoldCancel = { [weak self] _ in
-            // Accidental short press or chord — discard, don't insert.
-            self?.cancelSession()
+            // Chord, short press, or release before commit — discard, don't insert.
+            self?.cancelSession(announce: false)
         }
         hotkey.onClickAnywhere = { [weak self] point in self?.handleClickAnywhere(at: point) }
-        hotkey.onCancel = { [weak self] in self?.cancelSession() }
+        hotkey.onCancel = { [weak self] in self?.cancelSession(announce: true) }
 
         isTrusted = Inserter.isTrusted
         let inputMonitoring = IOHIDCheckAccess(kIOHIDRequestTypeListenEvent)
@@ -866,14 +870,35 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// Push-to-talk: key went down cleanly long enough — start listening.
-    private func startHoldSession(lane: DictationLane) {
-        guard !isRecording else { return }
-        Log.write("hold start lane=\(lane.rawValue)")
+    /// Push-to-talk: key down — start mic/STT immediately so first words aren't lost (P0).
+    private func armHoldSession(lane: DictationLane) {
+        if isRecording {
+            // Already in a session (e.g. tap mode) — don't nest.
+            Log.write("hold arm ignored — already recording")
+            return
+        }
+        Log.write("hold arm lane=\(lane.rawValue) — priming mic/HUD")
+        holdCommitted = false
         startSession(fromHold: true, cleanup: lane == .smart)
     }
 
-    /// Push-to-talk: key released — stop and insert.
+    /// Push-to-talk: hold delay elapsed while still bare — commit primed session.
+    private func commitHoldSession(lane: DictationLane) {
+        guard sessionFromHold else {
+            // Arm never started a session (auth denied, etc.) — try a fresh start.
+            Log.write("hold commit without prime — starting lane=\(lane.rawValue)")
+            holdCommitted = true
+            startSession(fromHold: true, cleanup: lane == .smart)
+            return
+        }
+        holdCommitted = true
+        Log.write("hold committed lane=\(lane.rawValue) recording=\(isRecording)")
+        if isRecording, sessionUsesCleanup {
+            hud.flashTarget("cleaned dictation", for: 1.6)
+        }
+    }
+
+    /// Push-to-talk: key released — stop and insert only if committed.
     private func endHoldSession(lane: DictationLane) {
         if !isRecording {
             // Released during mic permission / auth / setup — drop the pending start.
@@ -881,12 +906,20 @@ final class QuillApp: NSObject, NSApplicationDelegate {
                 Log.write("hold end before recording started — discarded (lane=\(lane.rawValue))")
                 sessionFromHold = false
                 sessionUsesCleanup = false
+                holdCommitted = false
             }
             hotkey.resetHoldState()
             return
         }
         guard sessionFromHold else {
             hotkey.resetHoldState()
+            return
+        }
+        // Primed but never committed (shouldn't happen if cancel path is wired) —
+        // still refuse to insert accidental short holds.
+        if !holdCommitted {
+            Log.write("hold end without commit — cancelling (lane=\(lane.rawValue))")
+            cancelSession()
             return
         }
         Log.write("hold end — stopping (lane=\(lane.rawValue))")
@@ -908,6 +941,8 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         guard !isRecording else { return }
         sessionFromHold = fromHold
         sessionUsesCleanup = cleanup
+        // Tap / menu starts are always "committed"; hold primes until delay fires.
+        if !fromHold { holdCommitted = true }
         // A new dictation supersedes any pending post-paste edit watch.
         editWatch.cancel()
 
@@ -925,11 +960,26 @@ final class QuillApp: NSObject, NSApplicationDelegate {
             guard granted else {
                 self.sessionFromHold = false
                 self.sessionUsesCleanup = false
+                self.holdCommitted = false
                 self.hotkey.resetHoldState()
                 self.hud.apply(.notice("Microphone access denied — enable Quill in Privacy & Security ▸ Microphone"))
                 self.hud.collapse(after: 4)
                 Inserter.openPrivacyPane("Privacy_Microphone")
                 return
+            }
+            // Hold may have been cancelled (chord / short release) while auth ran.
+            if fromHold {
+                guard self.sessionFromHold else {
+                    Log.write("hold cancelled during mic auth — skip capture")
+                    return
+                }
+                if !self.hotkey.isHolding, Defaults.currentGesture == .hold {
+                    Log.write("hold released before mic auth finished — aborting start")
+                    self.sessionFromHold = false
+                    self.sessionUsesCleanup = false
+                    self.holdCommitted = false
+                    return
+                }
             }
             self.beginCapture()
         }
@@ -939,6 +989,7 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         guard let creds = Auth.load() else {
             sessionFromHold = false
             sessionUsesCleanup = false
+            holdCommitted = false
             hotkey.resetHoldState()
             hud.apply(.notice("No Grok Build session found — run `grok` once to sign in"))
             hud.collapse(after: 4)
@@ -946,10 +997,12 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         }
 
         // If this was a hold and the key is already up, don't start a ghost session.
+        // isHolding includes the arm phase so early-prime survives the delay window.
         if sessionFromHold, !hotkey.isHolding, Defaults.currentGesture == .hold {
             Log.write("hold released before capture ready — aborting start")
             sessionFromHold = false
             sessionUsesCleanup = false
+            holdCommitted = false
             return
         }
 
@@ -1020,6 +1073,7 @@ final class QuillApp: NSObject, NSApplicationDelegate {
             stt = nil
             sessionFromHold = false
             sessionUsesCleanup = false
+            holdCommitted = false
             hotkey.resetHoldState()
             hud.apply(.notice(error.localizedDescription))
             hud.collapse(after: 3.5)
@@ -1034,7 +1088,8 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         startedAt = Date()
         refreshIcon()
         hud.apply(.listening)
-        if sessionUsesCleanup {
+        // For hold: flash "cleaned" only once committed (delay elapsed), not on arm.
+        if sessionUsesCleanup, !sessionFromHold || holdCommitted {
             hud.flashTarget("cleaned dictation", for: 1.6)
         }
         if let selection = capturedSelection {
@@ -1049,7 +1104,7 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         lastActivityText = nil
         noiseFloor = 0.02
         if !sessionFromHold { startPauseWatch() }
-        Log.write("recording started — watchClicks=\(hotkey.watchClicks) fromHold=\(sessionFromHold) cleanup=\(sessionUsesCleanup)")
+        Log.write("recording started — watchClicks=\(hotkey.watchClicks) fromHold=\(sessionFromHold) committed=\(holdCommitted) cleanup=\(sessionUsesCleanup)")
 
         tickTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
             guard let self, let startedAt = self.startedAt else { return }
@@ -1170,13 +1225,25 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.7, execute: work)
     }
 
-    /// Escape during a recording — throw it away, insert nothing.
-    private func cancelSession() {
-        guard isRecording else { return }
-        Log.write("cancelled by Escape")
+    /// Chord, short hold, release-before-commit, or Escape — throw it away, insert nothing.
+    private func cancelSession(announce: Bool = false) {
+        // Pending arm (mic auth not finished yet): clear flags so the auth
+        // callback will not start a ghost capture.
+        if !isRecording {
+            if sessionFromHold || holdCommitted {
+                Log.write("hold cancelled before recording started")
+                sessionFromHold = false
+                sessionUsesCleanup = false
+                holdCommitted = false
+                hotkey.resetHoldState()
+            }
+            return
+        }
+        Log.write(announce ? "cancelled by Escape" : "cancelled (discard session)")
         isRecording = false
         sessionFromHold = false
         sessionUsesCleanup = false
+        holdCommitted = false
         pendingVoiceStop?.cancel()
         pendingVoiceStop = nil
         pauseTimer?.invalidate()
@@ -1189,8 +1256,14 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         stt?.cancel()
         stt = nil
         refreshIcon()
-        hud.apply(.notice("Cancelled"))
-        hud.collapse(after: 0.9)
+        if announce {
+            hud.apply(.notice("Cancelled"))
+            hud.collapse(after: 0.9)
+        } else {
+            // Silent collapse for accidental short holds / chords.
+            hud.apply(.idle)
+            hud.collapse(after: 0.05)
+        }
     }
 
     /// Finish once the microphone actually goes quiet (upstream 0.7).
@@ -1229,6 +1302,7 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         guard isRecording else { return }
         isRecording = false
         sessionFromHold = false
+        holdCommitted = false
         // Keep sessionUsesCleanup until finishSession so the cleanup pass can run.
         stopReason = reason
         pendingVoiceStop?.cancel()
@@ -1283,21 +1357,36 @@ final class QuillApp: NSObject, NSApplicationDelegate {
 
         if wantsCleanup, let creds = Auth.load() {
             let vocabN = Vocabulary.count()
+            // P1: hard budget so 🌐 never multi-second stalls; Cleaner also times out.
+            let cleanupBudget: TimeInterval = 1.5
             hud.flashTarget(vocabN > 0
                 ? "cleaning with Grok… (\(vocabN) personal terms)"
-                : "cleaning with Grok…", for: 8)
+                : "cleaning with Grok…", for: cleanupBudget + 0.5)
             hud.update(text: trimmed)
-            Cleaner.clean(trimmed, token: creds.token) { [weak self] outcome in
-                guard let self else { return }
+            var finished = false
+            let apply: (Cleaner.Outcome) -> Void = { [weak self] outcome in
+                guard let self, !finished else { return }
+                finished = true
                 switch outcome {
                 case .cleaned(let polished):
                     Vocabulary.learnFromCleanup(raw: trimmed, cleaned: polished)
                     self.deliverInsert(polished, notedCleanup: true)
                 case .failed(let message):
                     Log.write("cleanup failed — using raw: \(message)")
-                    self.hud.flashTarget("cleanup failed — pasting raw", for: 2)
+                    let note = message.contains("timed out")
+                        ? "cleanup slow — pasting raw"
+                        : "cleanup failed — pasting raw"
+                    self.hud.flashTarget(note, for: 2)
                     self.deliverInsert(trimmed, notedCleanup: false)
                 }
+            }
+            let budgetWork = DispatchWorkItem {
+                apply(.failed("cleanup timed out (\(cleanupBudget)s budget)"))
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + cleanupBudget, execute: budgetWork)
+            Cleaner.clean(trimmed, token: creds.token) { outcome in
+                budgetWork.cancel()
+                apply(outcome)
             }
             return
         }
@@ -1388,6 +1477,7 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         isRecording = false
         sessionFromHold = false
         sessionUsesCleanup = false
+        holdCommitted = false
         pendingVoiceStop?.cancel()
         pendingVoiceStop = nil
         pauseTimer?.invalidate()

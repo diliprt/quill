@@ -166,16 +166,20 @@ final class DoubleTapRightCommand {
     private let window: CFTimeInterval = 0.42
     private static let f5KeyCode: Int64 = 96
     private static let modifierKeyCodes: Set<Int64> = [54, 55, 56, 57, 58, 59, 60, 61, 62, 63]
-    /// How long the bare trigger must be held before dictation starts.
-    /// Control is shared with Grok Build (⌃M, ⌃O, ⌃P, …) and terminal chords,
-    /// so it uses a longer delay than other triggers.
-    private var holdStartDelay: CFTimeInterval {
+    /// How long the bare trigger must be held before the session is *committed*.
+    /// Mic/HUD arm immediately on key-down (see `onHoldArm`); this delay only
+    /// decides whether release inserts or discards.
+    ///
+    /// Control / 🌐 share chords with Grok Build and system shortcuts → longer.
+    /// Right ⌥ / ⌘ are dedicated dictation keys → shorter (P3).
+    private func holdStartDelay(for trigger: Trigger) -> CFTimeInterval {
         switch trigger {
         case .control, .fnGlobe: return 0.45
-        default: return 0.32
+        case .rightOption, .rightCommand: return 0.22
+        case .f5: return 0.28
         }
     }
-    /// After hold starts, release sooner than this is treated as accidental (cancel).
+    /// After hold is committed, release sooner than this is treated as accidental (cancel).
     private let minHoldAfterStart: CFTimeInterval = 0.20
     private let tapMaxHold: CFTimeInterval = 0.35
 
@@ -231,9 +235,12 @@ final class DoubleTapRightCommand {
         || UserDefaults.standard.bool(forKey: "debugKeys")
 
     var onTrigger: (DictationLane) -> Void = { _ in }
+    /// Key-down: prime mic/HUD immediately so first words aren't lost (P0).
+    var onHoldArm: (DictationLane) -> Void = { _ in }
+    /// Hold delay elapsed while key still bare — commit the primed session.
     var onHoldStart: (DictationLane) -> Void = { _ in }
     var onHoldEnd: (DictationLane) -> Void = { _ in }
-    /// Hold was aborted (chord / accidental short press) — discard, don't insert.
+    /// Hold aborted (chord / short press / release before commit) — discard, don't insert.
     var onHoldCancel: (DictationLane) -> Void = { _ in }
     var onFirstEvent: () -> Void = {}
 
@@ -245,15 +252,16 @@ final class DoubleTapRightCommand {
     private var cancelTimer: Timer?
     private var escapeWasDown = false
 
-    /// True while any hold-to-talk session is live.
+    /// True while any hold is armed or committed (key still down for push-to-talk).
     var isHolding: Bool {
-        raw.holdActive || (smart?.holdActive == true)
+        raw.holdActive || raw.holdArmed
+            || (smart?.holdActive == true) || (smart?.holdArmed == true)
     }
 
     /// Which lane is currently holding, if any.
     var activeHoldLane: DictationLane? {
-        if raw.holdActive { return .raw }
-        if smart?.holdActive == true { return .smart }
+        if raw.holdActive || raw.holdArmed { return .raw }
+        if smart?.holdActive == true || smart?.holdArmed == true { return .smart }
         return nil
     }
 
@@ -361,13 +369,19 @@ final class DoubleTapRightCommand {
     }
 
     private func armHoldStart(_ binding: TriggerBinding) {
-        binding.cancelHoldArm()
+        abortHoldArm(binding, notify: false)
         binding.holdArmed = true
         binding.holdActive = false
         binding.holdStartedAt = 0
         binding.pressedAt = CACurrentMediaTime()
         binding.activityAtPress = Self.activityCounter()
         binding.sawKeyDownSinceTap = false
+
+        // P0: prime mic/HUD immediately — commit only after the delay.
+        let delay = holdStartDelay(for: binding.trigger)
+        if debugKeys { Log.write("    [keys] hold ARM \(binding.lane.rawValue) delay=\(String(format: "%.2f", delay))s") }
+        Log.write("hold arm (prime mic) delay=\(String(format: "%.2f", delay))s (\(binding.lane.rawValue)/\(binding.trigger.rawValue))")
+        DispatchQueue.main.async { [weak self] in self?.onHoldArm(binding.lane) }
 
         // Poll for chords while waiting: keyDown may not reach us without Input
         // Monitoring, but activity counters still move when ⌃C is pressed.
@@ -383,16 +397,16 @@ final class DoubleTapRightCommand {
                 if self.debugKeys {
                     Log.write("    [keys] hold arm aborted (\(binding.lane.rawValue)) — chord/activity")
                 }
-                binding.cancelHoldArm()
+                self.abortHoldArm(binding, notify: true)
                 return
             }
             guard self.triggerKeyIsDown(binding) else {
-                binding.cancelHoldArm()
+                self.abortHoldArm(binding, notify: true)
                 return
             }
             // Still bare? No other modifiers joining the chord.
             guard !self.extraModifiersDown(beyond: binding) else {
-                binding.cancelHoldArm()
+                self.abortHoldArm(binding, notify: true)
                 return
             }
             binding.holdArmed = false
@@ -404,12 +418,21 @@ final class DoubleTapRightCommand {
                 guard let self, let binding, binding.holdActive else { return }
                 self.pollHoldChord(binding)
             }
-            if self.debugKeys { Log.write("    [keys] hold START \(binding.lane.rawValue)") }
-            Log.write("hold armed → start after \(String(format: "%.2f", self.holdStartDelay))s (\(binding.lane.rawValue))")
+            if self.debugKeys { Log.write("    [keys] hold COMMIT \(binding.lane.rawValue)") }
+            Log.write("hold committed after \(String(format: "%.2f", delay))s (\(binding.lane.rawValue))")
             self.onHoldStart(binding.lane)
         }
         binding.holdStartWork = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + holdStartDelay, execute: work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+    }
+
+    /// Cancel an in-progress arm (before commit). Optionally notifies main to discard primed audio.
+    private func abortHoldArm(_ binding: TriggerBinding, notify: Bool) {
+        let wasArmed = binding.holdArmed
+        binding.cancelHoldArm()
+        guard notify, wasArmed else { return }
+        let lane = binding.lane
+        DispatchQueue.main.async { [weak self] in self?.onHoldCancel(lane) }
     }
 
     private func holdIsChorded(_ binding: TriggerBinding) -> Bool {
@@ -458,7 +481,7 @@ final class DoubleTapRightCommand {
         if binding.holdArmed {
             if holdIsChorded(binding) || !triggerKeyIsDown(binding) {
                 if debugKeys { Log.write("    [keys] hold arm cancelled mid-wait (\(binding.lane.rawValue))") }
-                binding.cancelHoldArm()
+                abortHoldArm(binding, notify: true)
             }
             return
         }
@@ -473,6 +496,7 @@ final class DoubleTapRightCommand {
 
     private func finishHoldIfActive(_ binding: TriggerBinding) {
         let wasActive = binding.holdActive
+        let wasArmed = binding.holdArmed
         let startedAt = binding.holdStartedAt
         let pressedAt = binding.pressedAt
         binding.chordPoll?.invalidate()
@@ -482,9 +506,14 @@ final class DoubleTapRightCommand {
         binding.holdArmed = false
 
         guard wasActive else {
-            // Released before hold delay — treat as tap / nothing; do not start.
+            // Released before commit delay — discard any primed mic/session (P0).
             binding.holdActive = false
             binding.pressedAt = 0
+            if wasArmed {
+                if debugKeys { Log.write("    [keys] hold RELEASE before commit (\(binding.lane.rawValue))") }
+                let lane = binding.lane
+                DispatchQueue.main.async { [weak self] in self?.onHoldCancel(lane) }
+            }
             return
         }
 
@@ -492,7 +521,7 @@ final class DoubleTapRightCommand {
         let now = CACurrentMediaTime()
         let heldAfterStart = startedAt > 0 ? now - startedAt : 0
         let totalPress = pressedAt > 0 ? now - pressedAt : heldAfterStart
-        // Accidental blip: started then released almost immediately.
+        // Accidental blip: committed then released almost immediately.
         if heldAfterStart < minHoldAfterStart {
             Log.write("hold cancelled — too short (\(String(format: "%.2f", totalPress))s press, \(String(format: "%.2f", heldAfterStart))s active)")
             binding.holdStartedAt = 0
@@ -522,7 +551,7 @@ final class DoubleTapRightCommand {
         }
 
         if type == .leftMouseDown {
-            for b in bindings where b.holdArmed { b.cancelHoldArm() }
+            for b in bindings where b.holdArmed { abortHoldArm(b, notify: true) }
             guard watchClicks else { return false }
             let location = event.location
             DispatchQueue.main.async { [weak self] in self?.onClickAnywhere(location) }
@@ -568,7 +597,7 @@ final class DoubleTapRightCommand {
                 b.sawKeyDownSinceTap = true
                 b.lastTapAt = 0
                 if b.holdArmed {
-                    b.cancelHoldArm()
+                    abortHoldArm(b, notify: true)
                 } else if b.holdActive, holdToTalk {
                     // Chord while holding the trigger (⌃ then C): cancel dictation.
                     Log.write("hold cancelled — keyDown while active (\(b.lane.rawValue))")
@@ -595,7 +624,7 @@ final class DoubleTapRightCommand {
                 for b in bindings {
                     b.lastTapAt = 0
                     if b.holdArmed {
-                        b.cancelHoldArm()
+                        abortHoldArm(b, notify: true)
                     } else if b.holdActive, holdToTalk {
                         Log.write("hold cancelled — other modifier (\(b.lane.rawValue))")
                         let lane = b.lane
@@ -643,7 +672,7 @@ final class DoubleTapRightCommand {
         // Release.
         if holdToTalk {
             finishHoldIfActive(binding)
-            binding.cancelHoldArm()
+            // Arm already cleared in finishHoldIfActive (with cancel notify if needed).
             return false
         }
 

@@ -1513,14 +1513,11 @@ final class QuillApp: NSObject, NSApplicationDelegate {
     }
 
     /// After a successful paste, watch the field for hand-edits and grow the dictionary.
+    /// Learning is silent in the HUD — see `vocab: user edit taught…` in Quill.log.
     private func armEditWatch(afterInserting text: String) {
         guard Vocabulary.learningEnabled, Vocabulary.learnFromEditsEnabled else { return }
-        editWatch.start(original: text) { [weak self] learned in
-            guard let self, learned > 0 else { return }
-            self.hud.apply(.notice(learned == 1
-                ? "Learned 1 term from your edit"
-                : "Learned \(learned) terms from your edit"))
-            self.hud.collapse(after: 2.2)
+        editWatch.start(original: text) { _ in
+            // Terms are already logged in Vocabulary.learnFromUserEdit.
         }
     }
 }

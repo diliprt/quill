@@ -5,7 +5,7 @@
 > **This repository** ([diliprt/quill](https://github.com/diliprt/quill)) is a public fork of
 > [xfreeze2/quill](https://github.com/xfreeze2/quill). Upstream behaviour is preserved; this
 > fork adds hold-to-talk, dual-key Grok cleanup, and a local personal dictionary.
-> Current fork build: **0.6.6** — hold-to-talk avoids Control/Grok shortcut clashes; cleanup is light (no meaning rewrites).
+> Current fork build: **0.6.9**.
 
 Tap a key, talk, then click into whatever window you want the words in. They appear there — at
 the end of what's already written, without touching your clipboard.
@@ -21,16 +21,41 @@ Additions on top of upstream (menu-bar right-click → settings):
 
 | Feature | What it does |
 |--------|----------------|
-| **Hold to talk** | Push-to-talk: press and hold the trigger to listen, release to stop and insert. Also still supports single-tap / double-tap toggle. |
-| **Dual triggers** | **Simple key** — raw speech-to-text only. **Smart key** — STT, then a fast Grok cleanup pass (grammar, filler, punctuation), then insert. Keys are chosen independently so you can keep both modes. |
-| **Clean up with Grok** | Toggle + smart-key picker. STT → Grok cleanup → insert. Prompt uses OpenWhispr-style `<transcript>` wrapping + FreeFlow/Superwhisper rules. Imports upstream **0.6.0** safety: connection warm-up while speaking, and reject rewrites that don’t still look like your words (≥~65–70% word overlap) — then paste raw. |
-| **Personal dictionary** | Local-only library of *unique* terms. Includes a **standard AI/harness seed** (Grok, Claude, MCP, GGUF, agents, dictation tools, etc.) merged on first launch of each seed version. Also learns while dictating, from cleanup pairs, and from **hand-edits after paste**. Menu: **Install standard AI / harness vocabulary** to re-merge. File: `~/Library/Application Support/com.freeze.quill/vocabulary.json`. |
+| **Hold to talk** | Push-to-talk: press and hold the trigger to listen, release to stop and insert. Prefer **not** using Control (conflicts with Grok Build `⌃…` shortcuts). |
+| **Dual triggers** | **Simple key** — raw STT only. **Smart key** — STT → cloud Grok cleanup → insert. |
+| **Clean up with Grok** | Toggle + smart-key picker. See [Cleanup model & latency notes](#cleanup-model--latency-notes) below. |
+| **Personal dictionary** | Local-only unique terms + AI/harness seed; learns from dictation, cleanup pairs, and post-paste edits. File: `~/Library/Application Support/com.freeze.quill/vocabulary.json`. |
 
 ### Typical layout (example)
 
 - Gesture: **Hold to talk**
-- Simple dictation: **Hold Control ⌃** → insert as spoken  
-- Cleaned dictation: **Hold 🌐** (or Right ⌥, etc.) → clean with Grok → insert  
+- Simple dictation: **Hold Right ⌥** or **Right ⌘** → insert as spoken  
+- Cleaned dictation: **Hold 🌐** → light cleanup with Grok → insert  
+- Leave **Control** free for Grok Build (`⌃M`, `⌃O`, etc.)
+
+### Cleanup model & latency notes
+
+**Tested preference (2026-08-08 / v0.6.9)** — keep this unless you re-benchmark:
+
+| Setting | Choice | Why |
+|---------|--------|-----|
+| **Cleanup model** | `grok-4-1-fast-non-reasoning` | Felt **faster and cleaner** in real use than `grok-4.20-0309-non-reasoning`. |
+| **Keep-warm pings** | **Off** (disabled) | Background / periodic warm-ups removed; test without extra API noise. |
+| **Model fallbacks** | **Single model only** | No multi-model retry chain (retries added latency). |
+| **Prompt style** | Light corrector | Grammar / caps / punctuation / obvious typos — not full rephrase. |
+| **Over-rewrite** | Reject → paste **raw** | Stricter “must still look like original” check. |
+
+**What slowed things down earlier (for future debugging):**
+
+1. Switching primary cleanup to **`grok-4.20-0309-non-reasoning`** (often multi-second latency in logs).
+2. Heavier OpenWhispr-style prompts + large vocabulary injection.
+3. Multi-model fallbacks on reject (extra round-trips).
+
+**Raw vs cleaned baseline from local logs:** raw insert ~**0.3–0.4s** after stop; good cleaned path ~**0.7–1.0s**; slow 4.20 path often **~4–7s**.
+
+**Code:** `Sources/Cleaner.swift` (`model` constant). Do not re-enable keep-warm or switch to 4.20 without a timed A/B on this machine.
+
+If `grok-4-1-fast-non-reasoning` is unavailable on the account, cleanup fails and the app pastes raw — check `~/Library/Logs/Quill.log` for `cleanup ok model=` / `cleanup fail`.
 
 ### Build this fork from source
 

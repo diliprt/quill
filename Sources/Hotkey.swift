@@ -167,11 +167,16 @@ final class DoubleTapRightCommand {
     private static let f5KeyCode: Int64 = 96
     private static let modifierKeyCodes: Set<Int64> = [54, 55, 56, 57, 58, 59, 60, 61, 62, 63]
     /// How long the bare trigger must be held before dictation starts.
-    /// Short taps and Control/Fn chords must never fire — 0.12s was too easy
-    /// to hit by accident and stole ⌃C / ⌃-shortcuts.
-    private let holdStartDelay: CFTimeInterval = 0.32
+    /// Control is shared with Grok Build (⌃M, ⌃O, ⌃P, …) and terminal chords,
+    /// so it uses a longer delay than other triggers.
+    private var holdStartDelay: CFTimeInterval {
+        switch trigger {
+        case .control, .fnGlobe: return 0.45
+        default: return 0.32
+        }
+    }
     /// After hold starts, release sooner than this is treated as accidental (cancel).
-    private let minHoldAfterStart: CFTimeInterval = 0.18
+    private let minHoldAfterStart: CFTimeInterval = 0.20
     private let tapMaxHold: CFTimeInterval = 0.35
 
     private var tap: CFMachPort?
@@ -411,10 +416,14 @@ final class DoubleTapRightCommand {
         if binding.sawKeyDownSinceTap { return true }
         if Self.activityCounter() != binding.activityAtPress { return true }
         if extraModifiersDown(beyond: binding) { return true }
+        // ⌃M / ⌃C: second key may not deliver keyDown to our tap without Input
+        // Monitoring — HID keyState still sees it.
+        if nonModifierKeyDown() { return true }
         return false
     }
 
     /// Any modifier flag that isn't part of this trigger's bare press.
+    /// Critical for Grok: ⌃⌘… and ⌃⇧… must never start Control hold-to-talk.
     private func extraModifiersDown(beyond binding: TriggerBinding) -> Bool {
         let flags = CGEventSource.flagsState(.combinedSessionState)
         let allowed: CGEventFlags
@@ -426,6 +435,22 @@ final class DoubleTapRightCommand {
         let interesting: CGEventFlags = [.maskCommand, .maskControl, .maskAlternate, .maskShift, .maskSecondaryFn]
         let extra = flags.intersection(interesting).subtracting(allowed)
         return !extra.isEmpty
+    }
+
+    /// True if any non-modifier key appears to be down (chord like ⌃C / ⌃M).
+    /// Best-effort via HID key state for common keys; activity counters cover the rest.
+    private func nonModifierKeyDown() -> Bool {
+        // Letters A–Z (0–25), digits, common punctuation — enough for shortcut chords.
+        for code: CGKeyCode in 0...50 {
+            if code == 55 || code == 54 || code == 56 || code == 57 || code == 58
+                || code == 59 || code == 60 || code == 61 || code == 62 || code == 63 {
+                continue // modifiers
+            }
+            if CGEventSource.keyState(.combinedSessionState, key: code) {
+                return true
+            }
+        }
+        return false
     }
 
     private func pollHoldChord(_ binding: TriggerBinding) {

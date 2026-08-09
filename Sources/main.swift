@@ -152,7 +152,6 @@ final class QuillApp: NSObject, NSApplicationDelegate {
     private var maxDurationTimer: Timer?
     private var tickTimer: Timer?
     private var trustTimer: Timer?
-    private var warmTimer: Timer?
     private var isTrusted = false
 
     /// Watches the focused field after paste so hand-edits teach the dictionary.
@@ -267,10 +266,6 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         // Merges once per seed version; never overwrites pinned user terms.
         _ = Vocabulary.ensureStandardSeed()
 
-        // Keep the cleanup HTTPS session warm for as long as Quill is running,
-        // so 🌐 dictation does not pay a cold TLS/handshake tax.
-        startCleanupKeepWarm()
-
         if selfTestPath != nil {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in self?.toggle(lane: .raw) }
         } else {
@@ -314,26 +309,6 @@ final class QuillApp: NSObject, NSApplicationDelegate {
             line += " · smart \(Defaults.smartTrigger.gesture(mode: mode))"
         }
         Log.write(line)
-    }
-
-    /// Ping the cleanup endpoint periodically so the shared URLSession stays hot.
-    private func startCleanupKeepWarm() {
-        warmTimer?.invalidate()
-        // Immediate warm on launch (deferred slightly so setup can settle).
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
-            guard let self, !self.isRecording else { return }
-            Cleaner.warmIfPossible()
-            Log.write("cleanup keep-warm: initial ping")
-        }
-        // TLS idle often cools within a few minutes; re-warm every 45s while open.
-        // Register only in .common (not scheduledTimer + add, which would double-fire).
-        let timer = Timer(timeInterval: 45, repeats: true) { [weak self] _ in
-            guard let self, !self.isRecording else { return }
-            Cleaner.warmIfPossible()
-        }
-        timer.tolerance = 5
-        RunLoop.main.add(timer, forMode: .common)
-        warmTimer = timer
     }
 
     private func requestInputMonitoring() {
@@ -1016,11 +991,6 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         }
         client.onComplete = { [weak self] text in self?.finishSession(with: text) }
         client.onFailure = { [weak self] failure in self?.abortSession(message: failure.message) }
-
-        // Warm cleanup TLS while they still speak (cold ~1.9s vs warm ~0.9s).
-        if sessionUsesCleanup {
-            Cleaner.warm(token: creds.token)
-        }
 
         client.connect(token: creds.token,
                        language: UserDefaults.standard.string(forKey: Defaults.language) ?? "en")

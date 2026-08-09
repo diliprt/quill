@@ -398,6 +398,10 @@ enum Inserter {
         }
     }
 
+    /// Near-caret field text sent to cleanup (spelling only). ~¼–⅓ of a typical
+    /// laptop screen of prose (~2–4k visible chars). See README “Future upgrades”.
+    /// FUTURE: if name fixes need more page context, try ~2000–2500 (about one
+    /// screen of chat/prose) — not full document/scrollback.
     private static let contextFieldCap = 800
     private static let contextSelectionCap = 400
     private static let contextTitleCap = 120

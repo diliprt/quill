@@ -93,7 +93,17 @@ Menu: **Quill ▸ Clean up with Grok ▸ Use nearby text for cleanup** (requires
 3. Turn toggle **on**, repeat the same test.  
 4. Compare `Nms` and whether spellings match the field.
 
-**Code:** `Sources/Cleaner.swift` (`model` + `budgetSeconds(for:)`), `Sources/Hotkey.swift` (arm/commit delays). Do not re-enable keep-warm or switch to 4.20 without a timed A/B on this machine.
+**Current caps:** field snippet **800** chars (near caret), selection **400**, title **120**. Mechanism is **Accessibility only** (no screenshot/OCR). One laptop screen of prose is often ~**2–4k** visible chars — so 800 is local neighborhood, not full page.
+
+### Future upgrades (parked — revisit if needed)
+
+| ID | Idea | Notes |
+|----|------|--------|
+| **P4-cap** | Raise `contextFieldCap` from **800 → ~2000–2500** | About one screen of chat/prose for better name fixes when terms sit slightly farther from the caret. Re-check cleanup **latency** (`Nms` in log) and privacy. Code: `Sources/Insert.swift` → `contextFieldCap`. **Not doing now** — only if 800 proves too small in real use. |
+| **P2** | Hard local replace for **pinned** dictionary aliases only | Optional; soft LLM dictionary stays. Skipped for now. |
+| ChatGPT / Electron fields | Richer context when AX `fieldChars=0` | Clipboard snippet, browser helpers, or optional screenshot — higher privacy cost; only if AX path stays weak. |
+
+**Code:** `Sources/Cleaner.swift` (`model` + `budgetSeconds(for:)`), `Sources/Hotkey.swift` (arm/commit delays), `Sources/Insert.swift` (P4 context). Do not re-enable keep-warm or switch to 4.20 without a timed A/B on this machine.
 
 If `grok-4-1-fast-non-reasoning` is unavailable on the account, cleanup fails and the app pastes raw — check `~/Library/Logs/Quill.log` for `cleanup budget` / `cleanup ok model=` / `cleanup fail` / `cleanup hard timeout`.
 

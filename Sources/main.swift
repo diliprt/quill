@@ -1430,6 +1430,9 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         let snapshot = VoiceCommands.stripAll(stt?.transcript ?? "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !snapshot.isEmpty, let creds = Auth.load() else { return }
+        // Already-clean text takes the local fast-path in finishSession —
+        // a speculative request for it would be pure waste.
+        guard !Cleaner.alreadyClean(snapshot) else { return }
         speculative = SpeculativeCleanup(input: snapshot,
                                          token: creds.token,
                                          context: cleanupContext())
@@ -1474,6 +1477,14 @@ final class QuillApp: NSObject, NSApplicationDelegate {
 
         if wantsCleanup, let creds = Auth.load() {
             laneLabel = "smart"
+            // Already formatted and structurally trivial: the corrector would be
+            // a no-op, so skip the round-trip and insert as spoken.
+            if Cleaner.alreadyClean(trimmed) {
+                speculativeLabel = "local"
+                Log.write("cleanup local fast-path — already clean (\(trimmed.count) chars)")
+                deliverInsert(trimmed, notedCleanup: false)
+                return
+            }
             let vocabN = Vocabulary.count()
             let hit = spec?.matches(final: trimmed) ?? false
             if let spec, !hit {

@@ -29,6 +29,10 @@ of 0.16–0.22s applies equally to every variant and is excluded).
 | spec_miss | transcript grew after stop | 3312 | **1558** | 1555 (2 requests) | ok / ok / ok |
 | spec_empty | nothing said before stop → spec skipped | 909 | 909 | 909 (1 request) | ok / ok / ok |
 | spec_race | cleanup (100ms) faster than finalize | 508 | 456 | **351** | ok / ok / ok |
+| fastpath_clean | STT already formatted the sentence | 457 | **151** (0 requests) | 153 (0 requests) | ok / ok / ok |
+| fastpath_lower | unformatted → must still use model | 456 | 457 | 304 | ok / ok / ok |
+| resemble_filler | filler-heavy speech, correct cleanup shrinks | 457 | 457 | 304 | **DIFF** / ok / ok |
+| spec_norm_hit | final transcript gains a trailing period | 1307 | 1257 | **805** (1 request) | ok / ok / ok |
 
 ## What improved
 
@@ -46,6 +50,28 @@ of 0.16–0.22s applies equally to every variant and is excluded).
    wrong text: a miss re-sends with the final transcript (correct output, one
    extra request), an empty partial skips speculation, and the resemble/budget
    guards still fire through the speculative path.
+
+## Round 2: cleaner-side fixes (same harness, added scenarios)
+
+4. **Local fast-path** (`Cleaner.alreadyClean`): when the transcript is short
+   (≤80 chars), a single sentence, already capitalized and terminated, with no
+   fillers or self-correction markers, the smart lane inserts it as-is —
+   `fastpath_clean` went 457→151ms with **zero** API requests. The gate is
+   conservative: unformatted text (`fastpath_lower`) still goes to the model
+   unchanged, and speculation is skipped for already-clean text so no request
+   is wasted.
+5. **Filler-aware resemble guard**: before, a filler-heavy sentence
+   ("um so uh um i think um uh friday works um") had its *correct* cleanup
+   rejected — the guard compared lengths against the raw original and the model
+   had legitimately removed the fillers the prompt told it to remove — so the
+   raw ums were pasted (`resemble_filler` before: fallback=true, wrong text).
+   After: fillers are stripped from the original before comparing; the cleanup
+   is accepted. Pure quality fix, no latency change.
+6. **Normalized speculative matching**: the server flushing a trailing period
+   into the final transcript used to turn a hit into a miss (second request +
+   full serial wait). Now whitespace/case/trailing punctuation are normalized
+   before comparing: `spec_norm_hit` resolves as a hit — 805ms with 1 request
+   instead of a 2-request miss.
 
 ## What did not improve
 
@@ -79,6 +105,9 @@ server change starts populating it, raise `earlyFinalizeGrace`.
 | Launch warm-up of api.x.ai | **Keep, verify on-device** | Same: costs one throwaway request at launch, expected to shave several hundred ms off the *first* dictation only. |
 | Mic buffer 2048 → 1024 | **Keep, watch CPU** | ~21ms shaved off audio delivery; not exercised by this harness (no mic on the VM). If a Mac ever shows audio glitches, revert first. |
 | Latency summary log line | **Keep** | It is the on-device instrument for everything above. |
+| Local fast-path (already-clean) | **Keep** | 3× faster and 0 requests on formatted short phrases; conservative gate leaves everything else on the model path. Only fires if the real STT emits formatted text — check `spec=local` in the log. |
+| Filler-aware resemble guard | **Keep** | Fixes a real bug: correct cleanups of filler-heavy speech were being rejected and the fillers pasted back. |
+| Normalized speculative matching | **Keep** | Converts trailing-punctuation/whitespace near-misses into hits; word content must still match exactly. |
 
 ## Reproduce
 

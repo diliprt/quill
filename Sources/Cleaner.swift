@@ -320,24 +320,62 @@ enum Cleaner {
 
     // MARK: - Upstream 0.6.0 resemble guard
 
+    /// The prompt's "pure fillers" — the only words the model may drop outright.
+    private static let fillers: Set<String> = ["um", "uh", "er", "ah", "hmm"]
+
     /// Is this plausibly the same sentence, only tidied?
     ///
     /// Length alone is not enough — a refusal can match a short dictation — so
     /// this is mostly a word-overlap test. Apostrophes are stripped (not split)
     /// so arent→aren't is not rejected as a rewrite.
+    ///
+    /// Fillers are stripped from the ORIGINAL before comparing: the prompt tells
+    /// the model to remove them, so a filler-heavy sentence legitimately shrinks.
+    /// Comparing against the raw original rejected exactly the cleanups that
+    /// were doing their job, pasting the ums back into the field.
     static func resembles(original: String, candidate: String) -> Bool {
         guard !candidate.isEmpty else { return false }
 
+        let originalWords = words(original).filter { !fillers.contains($0) }
+        guard !originalWords.isEmpty else { return false }
+
         // Tight band: over-eager rewrites almost always change length a lot.
-        let ratio = Double(candidate.count) / Double(max(original.count, 1))
+        // Measured against the filler-less original (joined by single spaces —
+        // close enough for a band this wide).
+        let strippedLength = originalWords.joined(separator: " ").count
+        let ratio = Double(candidate.count) / Double(max(strippedLength, 1))
         guard ratio > 0.75, ratio < 1.35 else { return false }
 
-        let originalWords = words(original)
-        guard !originalWords.isEmpty else { return false }
         let candidateWords = Set(words(candidate))
         let kept = originalWords.filter { candidateWords.contains($0) }.count
         // Require most of the original words to still be present.
         return Double(kept) / Double(originalWords.count) >= 0.82
+    }
+
+    // MARK: - Local fast-path
+
+    /// True when the transcript already looks fully formatted and simple enough
+    /// that the light corrector would be a no-op: short, a single sentence that
+    /// starts uppercase and ends with terminal punctuation, no fillers, no
+    /// self-corrections. For these, the ~1s round-trip buys nothing — insert
+    /// as-is. Anything structurally ambiguous still goes to the model.
+    static func alreadyClean(_ text: String) -> Bool {
+        guard !text.isEmpty, text.count <= 80 else { return false }
+        guard let first = text.unicodeScalars.first,
+              CharacterSet.uppercaseLetters.contains(first) else { return false }
+        guard let last = text.last, ".!?".contains(last) else { return false }
+        // One sentence only. Abbreviations ("Dr.") trip this — model path (safe).
+        guard text.filter({ ".!?".contains($0) }).count == 1 else { return false }
+
+        let tokens = words(text)
+        guard !tokens.isEmpty, tokens.count <= 14 else { return false }
+        guard Set(tokens).isDisjoint(with: fillers) else { return false }
+
+        let joined = " " + tokens.joined(separator: " ") + " "
+        for marker in ["no actually", "actually no", "i mean", "scratch that", "no wait"] {
+            if joined.contains(" \(marker) ") { return false }
+        }
+        return true
     }
 
     private static func words(_ text: String) -> [String] {

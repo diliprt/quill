@@ -38,6 +38,13 @@ class Handler(BaseHTTPRequestHandler):
             content = "Certainly! Here is a much better version of your text entirely."
         elif mode == "echo":
             content = transcript
+        elif mode == "strip_fillers":  # what the prompt actually asks the model to do
+            fillers = {"um", "uh", "er", "ah", "hmm"}
+            kept = [t for t in transcript.split() if t.lower().strip(".,") not in fillers]
+            content = " ".join(kept)
+            content = content[:1].upper() + content[1:]
+            if content and content[-1] not in ".!?":
+                content += "."
         else:  # clean
             content = transcript[:1].upper() + transcript[1:]
             if content and content[-1] not in ".!?":

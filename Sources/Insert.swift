@@ -251,6 +251,55 @@ enum Inserter {
         }
     }
 
+    /// Replace the just-inserted raw transcript with its polished version, in
+    /// place, without touching the clipboard or posting keystrokes. Succeeds only
+    /// when the focused field is AX-writable, not a secure field, and still ENDS
+    /// with the raw text (modulo trailing whitespace) — i.e. nothing was typed
+    /// since the paste. Returns false (leaving the field alone) in every other case.
+    static func polishInPlace(replacing raw: String, with polished: String) -> Bool {
+        guard isTrusted, !raw.isEmpty, !polished.isEmpty,
+              let element = focusedElement(),
+              !isSecureTextElement(element),
+              let value = stringAttribute(element, kAXValueAttribute as String)
+        else { return false }
+
+        let field = value as NSString
+        let rawRange = field.range(of: raw, options: .backwards)
+        guard rawRange.location != NSNotFound else { return false }
+
+        let tailStart = rawRange.location + rawRange.length
+        let tail = field.substring(
+            with: NSRange(location: tailStart, length: field.length - tailStart)
+        )
+        guard tail.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
+
+        var rangeSettable: DarwinBoolean = false
+        var textSettable: DarwinBoolean = false
+        guard AXUIElementIsAttributeSettable(element,
+                                             kAXSelectedTextRangeAttribute as CFString,
+                                             &rangeSettable) == .success,
+              rangeSettable.boolValue,
+              AXUIElementIsAttributeSettable(element,
+                                             kAXSelectedTextAttribute as CFString,
+                                             &textSettable) == .success,
+              textSettable.boolValue
+        else { return false }
+
+        var range = CFRange(location: rawRange.location, length: rawRange.length)
+        guard let axRange = AXValueCreate(.cfRange, &range),
+              AXUIElementSetAttributeValue(element,
+                                           kAXSelectedTextRangeAttribute as CFString,
+                                           axRange) == .success,
+              AXUIElementSetAttributeValue(element,
+                                           kAXSelectedTextAttribute as CFString,
+                                           polished as CFTypeRef) == .success,
+              let readback = stringAttribute(element, kAXValueAttribute as String),
+              readback.contains(polished)
+        else { return false }
+
+        return true
+    }
+
     /// Did the Accessibility write actually take? Several apps — web views in
     /// particular — return success from the setter and change nothing. If the
     /// field cannot be read back at all we have to take the setter at its word.

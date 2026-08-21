@@ -24,4 +24,11 @@ echo "→ compiling harness-before (baseline $BASELINE_REF)"
 echo "→ compiling harness-after (working tree, speculative enabled)"
 "$SWIFTC" -swift-version 5 -O -D SPECULATIVE build/src-after/*.swift Support.swift build/main.swift -o build/harness-after
 
+echo "→ governor unit test"
+mkdir -p build/gov
+cp governor_test_main.swift build/gov/main.swift
+"$SWIFTC" -swift-version 5 build/src-after/Cleaner.swift build/src-after/SpeculativeCleanup.swift \
+  Support.swift build/gov/main.swift -o build/governor-test
+./build/governor-test
+
 echo "✓ built build/harness-before and build/harness-after"

@@ -52,7 +52,16 @@ final class STTClient: NSObject, URLSessionWebSocketDelegate {
     /// A consolidated `transcript.done` — or a late tail segment — often lands a
     /// few hundred ms after speech_final. Give it that window before finalising
     /// ourselves so the better text still wins.
-    private let earlyFinalizeGrace: TimeInterval = 0.35
+    /// Widened from 0.35 after real-world tail clipping was suspected; tune with
+    /// `defaults write com.freeze.quill earlyFinalizeGrace -float …` without rebuilding.
+    private let earlyFinalizeGrace: TimeInterval = {
+        if let raw = ProcessInfo.processInfo.environment["QUILL_EARLY_GRACE"],
+           let seconds = Double(raw) {
+            return seconds
+        }
+        let configured = UserDefaults.standard.double(forKey: "earlyFinalizeGrace")
+        return configured > 0 ? configured : 0.6
+    }()
 
     /// Best transcript so far — fires on every partial.
     var onText: (String) -> Void = { _ in }
@@ -156,7 +165,10 @@ final class STTClient: NSObject, URLSessionWebSocketDelegate {
         guard doneSent, !didFinish, lastPartialSpeechFinal, haveTranscriptText else { return }
         earlyTimer?.invalidate()
         earlyTimer = Timer.scheduledTimer(withTimeInterval: earlyFinalizeGrace, repeats: false) { [weak self] _ in
-            self?.complete()
+            guard let self, !self.didFinish else { return }
+            let seconds = String(format: "%.2f", self.earlyFinalizeGrace)
+            Log.write("early finalize — no transcript.done within \(seconds)s of speech_final")
+            self.complete()
         }
     }
 

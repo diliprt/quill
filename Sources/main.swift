@@ -32,6 +32,8 @@ enum Defaults {
     /// Start the cleanup request on the live partial, before STT finalises.
     /// Default off so you can A/B the latency win against the extra request.
     static let cleanupSpeculative = "cleanupSpeculative"
+    /// Insert raw text immediately, then replace it only when a safe AX swap is possible.
+    static let cleanupEagerInsert = "cleanupEagerInsert"
     /// Learn unique personal terms into the local vocabulary file.
     static let vocabLearning = "vocabLearning"
     /// After paste, re-read the field and learn from hand edits.
@@ -58,6 +60,7 @@ enum Defaults {
             // Off until you enable for A/B (before = off, after = on).
             cleanupNearbyContext: false,
             cleanupSpeculative: false,
+            cleanupEagerInsert: false,
             vocabLearning: true,
             vocabLearnFromEdits: true,
             keepHistory: true,
@@ -67,6 +70,8 @@ enum Defaults {
     static var nearbyContextIsOn: Bool { bool(cleanupNearbyContext) }
 
     static var speculativeCleanupIsOn: Bool { bool(cleanupSpeculative) }
+
+    static var eagerInsertIsOn: Bool { bool(cleanupEagerInsert) }
 
     static func bool(_ key: String) -> Bool { UserDefaults.standard.bool(forKey: key) }
 
@@ -165,6 +170,11 @@ final class QuillApp: NSObject, NSApplicationDelegate {
     /// Cleanup fired at stop-time on the partial transcript (opt-in), resolved
     /// in `finishSession` only when the final transcript matches its input.
     private var speculative: SpeculativeCleanup?
+    /// Partial used to score speculation even when the governor pauses the request.
+    private var specSnapshot: String?
+    /// A polish retry belongs to one completed session and cannot cross the next start.
+    private var polishRetry: DispatchWorkItem?
+    private var polishGeneration = 0
 
     // Per-session latency instrumentation for the one-line summary after insert.
     private var finishEnteredAt: Date?
@@ -481,6 +491,18 @@ final class QuillApp: NSObject, NSApplicationDelegate {
             + "finalising, using the live text. Faster smart inserts; if the final "
             + "transcript differs, a second request is sent. Toggle anytime for A/B."
         cleanupMenu.addItem(speculativeItem)
+        let eagerItem = NSMenuItem(
+            title: "Paste raw first, polish in place",
+            action: #selector(toggleEagerInsert),
+            keyEquivalent: ""
+        )
+        eagerItem.target = self
+        eagerItem.state = Defaults.eagerInsertIsOn ? .on : .off
+        eagerItem.isEnabled = Defaults.cleanupIsOn
+        eagerItem.toolTip = "Inserts the raw transcript immediately, then swaps in the "
+            + "Grok-polished version in place when it arrives — only if you haven't typed "
+            + "and the field is Accessibility-writable. Toggle anytime for A/B."
+        cleanupMenu.addItem(eagerItem)
         cleanupMenu.addItem(.separator())
         let smartKeyHeader = NSMenuItem(title: "Smart key (Grok cleanup)", action: nil, keyEquivalent: "")
         smartKeyHeader.isEnabled = false
@@ -771,6 +793,16 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         hud.collapse(after: 2.5)
     }
 
+    @objc private func toggleEagerInsert() {
+        Defaults.flip(Defaults.cleanupEagerInsert)
+        let on = Defaults.eagerInsertIsOn
+        Log.write("cleanup eager insert = \(on)")
+        hud.apply(.notice(on
+            ? "Raw pastes first — Grok polish swaps in when safe"
+            : "Cleaned dictation waits for Grok before pasting"))
+        hud.collapse(after: 2.5)
+    }
+
     @objc private func setGestureMode(_ sender: NSMenuItem) {
         guard let raw = sender.representedObject as? String,
               let mode = GestureMode(rawValue: raw) else { return }
@@ -1015,6 +1047,9 @@ final class QuillApp: NSObject, NSApplicationDelegate {
 
     private func startSession(fromHold: Bool = false, cleanup: Bool = false) {
         guard !isRecording else { return }
+        invalidatePendingPolish()
+        speculative = nil
+        specSnapshot = nil
         sessionFromHold = fromHold
         sessionUsesCleanup = cleanup
         // Tap / menu starts are always "committed"; hold primes until delay fires.
@@ -1088,6 +1123,7 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         socketReady = false
         sawAnyText = false
         speculative = nil
+        specSnapshot = nil
         stopReason = sessionFromHold ? .hold : .hotkey
         didRunVoiceCommand = false
         lastStopCandidate = nil
@@ -1119,7 +1155,10 @@ final class QuillApp: NSObject, NSApplicationDelegate {
             let preview = VoiceCommands.stripAll(text)
             self.hud.update(text: self.sessionUsesCleanup ? "✦ \(preview)" : preview)
         }
-        client.onComplete = { [weak self] text in self?.finishSession(with: text) }
+        let sessionGeneration = polishGeneration
+        client.onComplete = { [weak self] text in
+            self?.finishSession(with: text, generation: sessionGeneration)
+        }
         client.onFailure = { [weak self] failure in self?.abortSession(message: failure.message) }
 
         client.connect(token: creds.token,
@@ -1310,6 +1349,9 @@ final class QuillApp: NSObject, NSApplicationDelegate {
 
     /// Chord, short hold, release-before-commit, or Escape — throw it away, insert nothing.
     private func cancelSession(announce: Bool = false) {
+        invalidatePendingPolish()
+        speculative = nil
+        specSnapshot = nil
         // Pending arm (mic auth not finished yet): clear flags so the auth
         // callback will not start a ghost capture.
         if !isRecording {
@@ -1328,7 +1370,6 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         sessionUsesCleanup = false
         holdCommitted = false
         // A result for THIS session's words must never surface in a later one.
-        speculative = nil
         pendingVoiceStop?.cancel()
         pendingVoiceStop = nil
         pauseTimer?.invalidate()
@@ -1429,10 +1470,18 @@ final class QuillApp: NSObject, NSApplicationDelegate {
     private func startSpeculativeCleanup() {
         let snapshot = VoiceCommands.stripAll(stt?.transcript ?? "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !snapshot.isEmpty, let creds = Auth.load() else { return }
+        guard !snapshot.isEmpty else { return }
         // Already-clean text takes the local fast-path in finishSession —
         // a speculative request for it would be pure waste.
         guard !Cleaner.alreadyClean(snapshot) else { return }
+        specSnapshot = snapshot
+
+        let history = SpeculationGovernor.history()
+        guard SpeculationGovernor.shouldSpeculate(history: history) else {
+            Log.write("cleanup speculative paused — \(SpeculationGovernor.describe(history))")
+            return
+        }
+        guard let creds = Auth.load() else { return }
         speculative = SpeculativeCleanup(input: snapshot,
                                          token: creds.token,
                                          context: cleanupContext())
@@ -1450,7 +1499,7 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         return Inserter.captureCleanupContext(priorSelection: capturedSelection)
     }
 
-    private func finishSession(with text: String) {
+    private func finishSession(with text: String, generation: Int) {
         stt = nil
         let enteredAt = Date()
         finishEnteredAt = enteredAt
@@ -1465,6 +1514,7 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         sessionUsesCleanup = false
 
         guard !trimmed.isEmpty else {
+            specSnapshot = nil
             if didRunVoiceCommand {
                 hud.apply(.notice("Opened Grok Build"))
                 hud.collapse(after: 1.6)
@@ -1480,20 +1530,85 @@ final class QuillApp: NSObject, NSApplicationDelegate {
             // Already formatted and structurally trivial: the corrector would be
             // a no-op, so skip the round-trip and insert as spoken.
             if Cleaner.alreadyClean(trimmed) {
+                specSnapshot = nil
                 speculativeLabel = "local"
                 Log.write("cleanup local fast-path — already clean (\(trimmed.count) chars)")
                 deliverInsert(trimmed, notedCleanup: false)
                 return
             }
-            let vocabN = Vocabulary.count()
+
+            if let snapshot = specSnapshot {
+                SpeculationGovernor.record(
+                    hit: SpeculativeCleanup.equivalent(snapshot, trimmed)
+                )
+            }
+            specSnapshot = nil
+
             let hit = spec?.matches(final: trimmed) ?? false
+            if Defaults.speculativeCleanupIsOn, spec == nil {
+                speculativeLabel = "paused"
+            } else if hit {
+                speculativeLabel = "hit"
+            } else if spec != nil {
+                speculativeLabel = "miss"
+            }
             if let spec, !hit {
                 Log.write("cleanup speculative miss (resent) "
                     + "partial=\(spec.input.count) final=\(trimmed.count) chars")
             }
+
+            let eager = Defaults.eagerInsertIsOn
+            let eagerGeneration = generation
+            if eager {
+                laneLabel = "smart-eager"
+                deliverInsert(trimmed, notedCleanup: false)
+            }
+
             // A hit reuses the request already in flight, so only a resend needs
             // context captured now.
             let context: Inserter.CleanupContext? = hit ? nil : cleanupContext()
+
+            func resolveCleanup(_ completion: @escaping (Cleaner.Outcome) -> Void) {
+                if hit, let spec {
+                    // The closure keeps the speculative request alive now that
+                    // the session no longer holds it.
+                    spec.resolve { outcome in
+                        let ms = Int(Date().timeIntervalSince(spec.startedAt) * 1000)
+                        Log.write("cleanup speculative hit \(ms)ms")
+                        completion(outcome)
+                    }
+                } else {
+                    Cleaner.clean(trimmed, token: creds.token, context: context,
+                                  completion: completion)
+                }
+            }
+
+            if eager {
+                resolveCleanup { [weak self] outcome in
+                    guard let self, self.polishGeneration == eagerGeneration else { return }
+                    self.cleanupSeconds = Date().timeIntervalSince(enteredAt)
+                    switch outcome {
+                    case .cleaned(let polished):
+                        guard !polished.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                            Log.write("polish skipped — cleanup returned empty text")
+                            return
+                        }
+                        guard polished != trimmed else {
+                            Log.write("polish skipped — cleanup left text unchanged")
+                            return
+                        }
+                        self.attemptPolishSwap(raw: trimmed,
+                                               polished: polished,
+                                               startedAt: enteredAt,
+                                               generation: eagerGeneration)
+                    case .failed(let message):
+                        Log.write("polish skipped — cleanup failed: \(message)")
+                    }
+                }
+                return
+            }
+
+            let vocabN = Vocabulary.count()
             // Length-scaled budget (short phrases stay snappy; long rants get up to ~8s).
             // A speculative request has been running since stop, so only what is
             // left of its budget may still be waited on.
@@ -1529,27 +1644,59 @@ final class QuillApp: NSObject, NSApplicationDelegate {
                 apply(.failed("cleanup timed out (\(budgetLabel)s budget)"))
             }
             DispatchQueue.main.asyncAfter(deadline: .now() + cleanupBudget, execute: budgetWork)
-            if hit, let spec {
-                speculativeLabel = "hit"
-                // The closure is what keeps the speculative request alive now
-                // that the session no longer holds it.
-                spec.resolve { outcome in
-                    budgetWork.cancel()
-                    let ms = Int(Date().timeIntervalSince(spec.startedAt) * 1000)
-                    Log.write("cleanup speculative hit \(ms)ms")
-                    apply(outcome)
-                }
-            } else {
-                if spec != nil { speculativeLabel = "miss" }
-                Cleaner.clean(trimmed, token: creds.token, context: context) { outcome in
-                    budgetWork.cancel()
-                    apply(outcome)
-                }
+            resolveCleanup { outcome in
+                budgetWork.cancel()
+                apply(outcome)
             }
             return
         }
 
+        specSnapshot = nil
         deliverInsert(trimmed, notedCleanup: false)
+    }
+
+    /// Replace eager raw text only while this completed session still owns the field.
+    /// Main queue only.
+    private func attemptPolishSwap(raw: String,
+                                   polished: String,
+                                   startedAt: Date,
+                                   generation: Int,
+                                   attempt: Int = 0) {
+        guard generation == polishGeneration else { return }
+        polishRetry = nil
+
+        if Inserter.polishInPlace(replacing: raw, with: polished) {
+            let ms = Int((Date().timeIntervalSince(startedAt) * 1000).rounded())
+            Log.write("polish swapped in place +\(ms)ms after final")
+            Vocabulary.learnFromCleanup(raw: raw, cleaned: polished)
+            hud.flashTarget("✦ polished", for: 1.2)
+            hud.update(text: polished)
+            armEditWatch(afterInserting: polished)
+            return
+        }
+
+        guard attempt < 2 else {
+            Log.write("polish skipped — field changed or not AX-writable")
+            return
+        }
+
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, generation == self.polishGeneration else { return }
+            self.polishRetry = nil
+            self.attemptPolishSwap(raw: raw,
+                                   polished: polished,
+                                   startedAt: startedAt,
+                                   generation: generation,
+                                   attempt: attempt + 1)
+        }
+        polishRetry = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: work)
+    }
+
+    private func invalidatePendingPolish() {
+        polishGeneration += 1
+        polishRetry?.cancel()
+        polishRetry = nil
     }
 
     /// Remember + insert into the focused field.
@@ -1648,12 +1795,14 @@ final class QuillApp: NSObject, NSApplicationDelegate {
 
     private func abortSession(message: String) {
         Log.write("aborted — \(message)")
+        invalidatePendingPolish()
         isRecording = false
         sessionFromHold = false
         sessionUsesCleanup = false
         holdCommitted = false
         // A result for THIS session's words must never surface in a later one.
         speculative = nil
+        specSnapshot = nil
         pendingVoiceStop?.cancel()
         pendingVoiceStop = nil
         pauseTimer?.invalidate()
@@ -1690,6 +1839,7 @@ final class QuillApp: NSObject, NSApplicationDelegate {
     /// After a successful paste, watch the field for hand-edits and grow the dictionary.
     /// Learning is silent in the HUD — see `vocab: user edit taught…` in Quill.log.
     private func armEditWatch(afterInserting text: String) {
+        editWatch.cancel()
         guard Vocabulary.learningEnabled, Vocabulary.learnFromEditsEnabled else { return }
         editWatch.start(original: text) { _ in
             // Terms are already logged in Vocabulary.learnFromUserEdit.

@@ -88,6 +88,29 @@ SCENARIOS = {
                 (800, partial(0, "hello world", speech_final=True, is_final=True))],
         "post": [(400, done())],
     },
+    # -------- local fast-path / guard fixes --------
+    "fastpath_clean": {  # STT already formatted the sentence
+        "pre": [(300, partial(0, "Send it to John.")),
+                (800, partial(0, "Send it to John.", speech_final=True, is_final=True))],
+        "post": [(150, done())],
+    },
+    "fastpath_lower": {  # unformatted -> must still go to the model
+        "pre": [(300, partial(0, "send it to john")),
+                (800, partial(0, "send it to john", speech_final=True, is_final=True))],
+        "post": [(150, done())],
+    },
+    "resemble_filler": {  # filler-heavy; a correct cleanup shrinks a lot
+        "pre": [(300, partial(0, "um so uh um i think um uh friday works um")),
+                (800, partial(0, "um so uh um i think um uh friday works um",
+                              speech_final=True, is_final=True))],
+        "post": [(150, done())],
+    },
+    "spec_norm_hit": {  # final transcript = partial + a flushed trailing period
+        "pre": [(300, partial(0, "hello world")),
+                (800, partial(0, "hello world", speech_final=True, is_final=True))],
+        "post": [(100, partial(0, "hello world.", speech_final=True, is_final=True)),
+                 (500, done())],
+    },
 }
 # Smart-lane scenarios share raw timelines under their own names.
 for alias, base in [

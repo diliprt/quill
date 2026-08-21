@@ -60,6 +60,17 @@ func finishSession(with text: String) {
               "output": trimmed])
     }
 
+    #if SPECULATIVE
+    // Mirrors the local fast-path in main.swift finishSession.
+    if Cleaner.alreadyClean(trimmed) {
+        specLabel = "local"
+        emit(["stop_to_final_ms": ms(stopAt, tFinal),
+              "cleanup_ms": 0,
+              "stop_to_ready_ms": ms(stopAt, tFinal),
+              "output": trimmed])
+    }
+    #endif
+
     let tCleanStart = Date()
     var budget = Cleaner.budgetSeconds(for: trimmed)
     var hit = false
@@ -131,7 +142,7 @@ DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(stopMs)) {
     #if SPECULATIVE
     if lane == "smart", specWanted {
         let snapshot = client.transcript.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !snapshot.isEmpty {
+        if !snapshot.isEmpty, !Cleaner.alreadyClean(snapshot) {
             chatRequests += 1
             speculative = SpeculativeCleanup(input: snapshot, token: "benchtoken", context: nil)
             Log.write("cleanup speculative fired for \(snapshot.count) chars")

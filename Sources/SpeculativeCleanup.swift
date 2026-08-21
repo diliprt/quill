@@ -23,7 +23,21 @@ final class SpeculativeCleanup {
         }
     }
 
-    func matches(final text: String) -> Bool { input == text }
+    /// Whitespace, case, and trailing punctuation are normalised away: the
+    /// server often flushes a trailing period or space into the final
+    /// transcript, and the cleanup output for two texts differing only by
+    /// those is identical — treating them as a miss just re-bought the same
+    /// answer with a second request. Word content must still match exactly.
+    func matches(final text: String) -> Bool {
+        Self.normalized(input) == Self.normalized(text)
+    }
+
+    private static func normalized(_ text: String) -> String {
+        text.lowercased()
+            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+            .replacingOccurrences(of: "[\\s.,!?;:…]+$", with: "", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
 
     /// Main queue only (that is where `Cleaner.clean` reports). Delivers
     /// immediately when the request already came back.

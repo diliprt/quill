@@ -45,6 +45,11 @@ SCENARIOS = {
     "spec_miss":         ("smart", "delay_ms=800&mode=clean", "Hello world and more.", "final grew after stop"),
     "spec_empty":        ("smart", "delay_ms=300&mode=clean", "Hello world.", "nothing said before stop"),
     "spec_race":         ("smart", "delay_ms=100&mode=clean", "Hello world.", "cleanup faster than finalize"),
+    "fastpath_clean":    ("smart", "delay_ms=300&mode=echo", "Send it to John.", "already formatted -> local fast-path"),
+    "fastpath_lower":    ("smart", "delay_ms=300&mode=clean", "Send it to john.", "unformatted -> still goes to model"),
+    "resemble_filler":   ("smart", "delay_ms=300&mode=strip_fillers", "So i think friday works.",
+                          "filler-heavy; guard must accept the shrink"),
+    "spec_norm_hit":     ("smart", "delay_ms=800&mode=clean", "Hello world.", "final gains trailing period; normalized hit"),
 }
 
 

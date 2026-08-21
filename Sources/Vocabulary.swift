@@ -498,6 +498,12 @@ enum Vocabulary {
     }
 
     /// Longest common prefix/suffix → middle spans that changed.
+    ///
+    /// The spans are expanded to WORD boundaries: fixing "Signa" → "Signara"
+    /// in place types only "ra", and diffing the raw character span taught
+    /// nothing — the exact correction this feature exists for. The expansion
+    /// stays inside the common prefix/suffix, so it is identical in both
+    /// strings and keeps the middles aligned.
     private static func editedMiddles(before: String, after: String) -> (String, String) {
         let b = Array(before)
         let a = Array(after)
@@ -506,6 +512,8 @@ enum Vocabulary {
         var j = 0
         while j < (b.count - i), j < (a.count - i),
               b[b.count - 1 - j] == a[a.count - 1 - j] { j += 1 }
+        while i > 0, !b[i - 1].isWhitespace { i -= 1 }
+        while j > 0, !b[b.count - j].isWhitespace { j -= 1 }
         let oldMid = String(b[i..<(b.count - j)])
         let newMid = String(a[i..<(a.count - j)])
         return (oldMid, newMid)
@@ -638,11 +646,12 @@ enum Vocabulary {
             pattern: #"\b(?:[A-Z][a-z0-9]+(?:\s+[A-Z][a-z0-9]+){1,3})\b"#)
         for m in multi.matches(in: text, range: NSRange(text.startIndex..., in: text)) {
             if let r = Range(m.range, in: text) {
-                let phrase = String(text[r])
-                // Skip pure sentence starts that are common: "The App", "This Feature"
-                let parts = phrase.split(separator: " ")
-                if parts.count >= 2, parts.contains(where: { !isCommonWord(String($0)) }) {
-                    keep(phrase)
+                // Drop leading everyday capitalized words so a sentence start
+                // never rides along: "Tell Grok Build" → "Grok Build".
+                var parts = String(text[r]).split(separator: " ").map(String.init)
+                while let first = parts.first, isCommonWord(first) { parts.removeFirst() }
+                if parts.count >= 2, parts.contains(where: { !isCommonWord($0) }) {
+                    keep(parts.joined(separator: " "))
                 }
             }
         }

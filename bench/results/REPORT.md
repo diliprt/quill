@@ -127,6 +127,32 @@ settle at 2000ms instead of 600ms — still better than the pre-PR 2500–3000ms
 and every accuracy scenario now passes, including the two that previously
 documented deliberate trades (`late_head`, `consolidated_slow`).
 
+## Round 5: correction-learning audit — found broken, fixed
+
+Asked whether "learn from my edits after paste" works, the audit found a
+pre-existing bug (not introduced by this branch): fixing a word IN PLACE — the
+most common correction gesture — taught nothing. Typing "ra" to turn "Signa"
+into "Signara" made the diff isolator (`editedMiddles`) hand the learner the
+raw character fragment "ra", which matches no word. Learning only worked when
+a whole word was selected and replaced.
+
+Fixes, verified by 11 deterministic assertions in `bench/vocab_test_main.swift`
+(compiled against the real shipped `Vocabulary.swift`, run by `bench/build.sh`):
+- `editedMiddles` expands the changed span to word boundaries (inside the
+  common prefix/suffix, so both sides stay aligned) — in-place fixes now teach
+  the full word pair (Signa → Signara stored as term + alias).
+- Multi-word extraction strips leading everyday capitalized words, so cleanup
+  pairs teach "Grok Build", not "Tell Grok Build".
+- Regression guards all pass: identical text, appended everyday words, and
+  disabled toggles still teach nothing; common words are never stored.
+
+The runtime chain was audited and is intact: insert completion arms
+`PostInsertEditWatch` (snapshot 0.55s after paste, 1Hz polls, 30s window,
+2 stable ticks after an edit), and the round-3 eager polish re-arms the watcher
+with the polished text so Quill's own swap is never mistaken for a user edit.
+On-device confirmation: `vocab: edit-watch armed` then `vocab: user edit
+taught …` in Quill.log after hand-fixing a pasted word.
+
 ## What did not improve
 
 - **Fast-server scenarios** (`fast_done`, `consolidated_fast`,

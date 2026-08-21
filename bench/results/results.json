@@ -1,0 +1,758 @@
+[
+  {
+    "variant": "before",
+    "scenario": "fast_done",
+    "spec": "off",
+    "lane": "raw",
+    "note": "done 150ms after stop",
+    "median_stop_to_ready_ms": 151,
+    "median_stop_to_final_ms": 151,
+    "chat_requests": 0,
+    "spec_label": "off",
+    "expected": "hello world",
+    "outputs": [
+      "hello world"
+    ],
+    "accurate": true,
+    "raw_fallback": false,
+    "errors": []
+  },
+  {
+    "variant": "after",
+    "scenario": "fast_done",
+    "spec": "off",
+    "lane": "raw",
+    "note": "done 150ms after stop",
+    "median_stop_to_ready_ms": 152,
+    "median_stop_to_final_ms": 152,
+    "chat_requests": 0,
+    "spec_label": "off",
+    "expected": "hello world",
+    "outputs": [
+      "hello world"
+    ],
+    "accurate": true,
+    "raw_fallback": false,
+    "errors": []
+  },
+  {
+    "variant": "before",
+    "scenario": "slow_done",
+    "spec": "off",
+    "lane": "raw",
+    "note": "done 2.5s after stop",
+    "median_stop_to_ready_ms": 2504,
+    "median_stop_to_final_ms": 2504,
+    "chat_requests": 0,
+    "spec_label": "off",
+    "expected": "hello world",
+    "outputs": [
+      "hello world"
+    ],
+    "accurate": true,
+    "raw_fallback": false,
+    "errors": []
+  },
+  {
+    "variant": "after",
+    "scenario": "slow_done",
+    "spec": "off",
+    "lane": "raw",
+    "note": "done 2.5s after stop",
+    "median_stop_to_ready_ms": 350,
+    "median_stop_to_final_ms": 350,
+    "chat_requests": 0,
+    "spec_label": "off",
+    "expected": "hello world",
+    "outputs": [
+      "hello world"
+    ],
+    "accurate": true,
+    "raw_fallback": false,
+    "errors": []
+  },
+  {
+    "variant": "before",
+    "scenario": "missing_done_sf",
+    "spec": "off",
+    "lane": "raw",
+    "note": "no done; speech_final seen",
+    "median_stop_to_ready_ms": 3000,
+    "median_stop_to_final_ms": 3000,
+    "chat_requests": 0,
+    "spec_label": "off",
+    "expected": "hello world",
+    "outputs": [
+      "hello world"
+    ],
+    "accurate": true,
+    "raw_fallback": false,
+    "errors": []
+  },
+  {
+    "variant": "after",
+    "scenario": "missing_done_sf",
+    "spec": "off",
+    "lane": "raw",
+    "note": "no done; speech_final seen",
+    "median_stop_to_ready_ms": 350,
+    "median_stop_to_final_ms": 350,
+    "chat_requests": 0,
+    "spec_label": "off",
+    "expected": "hello world",
+    "outputs": [
+      "hello world"
+    ],
+    "accurate": true,
+    "raw_fallback": false,
+    "errors": []
+  },
+  {
+    "variant": "before",
+    "scenario": "missing_done_nosf",
+    "spec": "off",
+    "lane": "raw",
+    "note": "no done; no speech_final",
+    "median_stop_to_ready_ms": 3000,
+    "median_stop_to_final_ms": 3000,
+    "chat_requests": 0,
+    "spec_label": "off",
+    "expected": "hello world",
+    "outputs": [
+      "hello world"
+    ],
+    "accurate": true,
+    "raw_fallback": false,
+    "errors": []
+  },
+  {
+    "variant": "after",
+    "scenario": "missing_done_nosf",
+    "spec": "off",
+    "lane": "raw",
+    "note": "no done; no speech_final",
+    "median_stop_to_ready_ms": 2000,
+    "median_stop_to_final_ms": 2000,
+    "chat_requests": 0,
+    "spec_label": "off",
+    "expected": "hello world",
+    "outputs": [
+      "hello world"
+    ],
+    "accurate": true,
+    "raw_fallback": false,
+    "errors": []
+  },
+  {
+    "variant": "before",
+    "scenario": "late_tail",
+    "spec": "off",
+    "lane": "raw",
+    "note": "segment lands 400ms after stop",
+    "median_stop_to_ready_ms": 2504,
+    "median_stop_to_final_ms": 2504,
+    "chat_requests": 0,
+    "spec_label": "off",
+    "expected": "hello world and more",
+    "outputs": [
+      "hello world and more"
+    ],
+    "accurate": true,
+    "raw_fallback": false,
+    "errors": []
+  },
+  {
+    "variant": "after",
+    "scenario": "late_tail",
+    "spec": "off",
+    "lane": "raw",
+    "note": "segment lands 400ms after stop",
+    "median_stop_to_ready_ms": 753,
+    "median_stop_to_final_ms": 753,
+    "chat_requests": 0,
+    "spec_label": "off",
+    "expected": "hello world and more",
+    "outputs": [
+      "hello world and more"
+    ],
+    "accurate": true,
+    "raw_fallback": false,
+    "errors": []
+  },
+  {
+    "variant": "before",
+    "scenario": "consolidated_fast",
+    "spec": "off",
+    "lane": "raw",
+    "note": "done carries better text @200ms",
+    "median_stop_to_ready_ms": 201,
+    "median_stop_to_final_ms": 201,
+    "chat_requests": 0,
+    "spec_label": "off",
+    "expected": "Hello, world.",
+    "outputs": [
+      "Hello, world."
+    ],
+    "accurate": true,
+    "raw_fallback": false,
+    "errors": []
+  },
+  {
+    "variant": "after",
+    "scenario": "consolidated_fast",
+    "spec": "off",
+    "lane": "raw",
+    "note": "done carries better text @200ms",
+    "median_stop_to_ready_ms": 201,
+    "median_stop_to_final_ms": 201,
+    "chat_requests": 0,
+    "spec_label": "off",
+    "expected": "Hello, world.",
+    "outputs": [
+      "Hello, world."
+    ],
+    "accurate": true,
+    "raw_fallback": false,
+    "errors": []
+  },
+  {
+    "variant": "before",
+    "scenario": "consolidated_slow",
+    "spec": "off",
+    "lane": "raw",
+    "note": "done carries better text @600ms",
+    "median_stop_to_ready_ms": 602,
+    "median_stop_to_final_ms": 602,
+    "chat_requests": 0,
+    "spec_label": "off",
+    "expected": "Hello, world.",
+    "outputs": [
+      "Hello, world."
+    ],
+    "accurate": true,
+    "raw_fallback": false,
+    "errors": []
+  },
+  {
+    "variant": "after",
+    "scenario": "consolidated_slow",
+    "spec": "off",
+    "lane": "raw",
+    "note": "done carries better text @600ms",
+    "median_stop_to_ready_ms": 350,
+    "median_stop_to_final_ms": 350,
+    "chat_requests": 0,
+    "spec_label": "off",
+    "expected": "Hello, world.",
+    "outputs": [
+      "hello world"
+    ],
+    "accurate": false,
+    "raw_fallback": false,
+    "errors": []
+  },
+  {
+    "variant": "before",
+    "scenario": "empty_interims",
+    "spec": "off",
+    "lane": "raw",
+    "note": "empty partials must not wipe text",
+    "median_stop_to_ready_ms": 151,
+    "median_stop_to_final_ms": 151,
+    "chat_requests": 0,
+    "spec_label": "off",
+    "expected": "hello world",
+    "outputs": [
+      "hello world"
+    ],
+    "accurate": true,
+    "raw_fallback": false,
+    "errors": []
+  },
+  {
+    "variant": "after",
+    "scenario": "empty_interims",
+    "spec": "off",
+    "lane": "raw",
+    "note": "empty partials must not wipe text",
+    "median_stop_to_ready_ms": 151,
+    "median_stop_to_final_ms": 151,
+    "chat_requests": 0,
+    "spec_label": "off",
+    "expected": "hello world",
+    "outputs": [
+      "hello world"
+    ],
+    "accurate": true,
+    "raw_fallback": false,
+    "errors": []
+  },
+  {
+    "variant": "before",
+    "scenario": "long_multiseg",
+    "spec": "off",
+    "lane": "raw",
+    "note": "~700 chars over 4 segments",
+    "median_stop_to_ready_ms": 301,
+    "median_stop_to_final_ms": 301,
+    "chat_requests": 0,
+    "spec_label": "off",
+    "expected": "the quick brown fox jumps over the lazy dog and keeps running through the field while the narrator keeps talking about nothing in particular for quite a while longer than anyone asked for the quick brown fox jumps over the lazy dog and keeps running through the field while the narrator keeps talking about nothing in particular for quite a while longer than anyone asked for the quick brown fox jumps over the lazy dog and keeps running through the field while the narrator keeps talking about nothing in particular for quite a while longer than anyone asked for the quick brown fox jumps over the lazy dog and keeps running through the field while the narrator keeps talking about nothing in particular for quite a while longer than anyone asked for",
+    "outputs": [
+      "the quick brown fox jumps over the lazy dog and keeps running through the field while the narrator keeps talking about nothing in particular for quite a while longer than anyone asked for the quick brown fox jumps over the lazy dog and keeps running through the field while the narrator keeps talking about nothing in particular for quite a while longer than anyone asked for the quick brown fox jumps over the lazy dog and keeps running through the field while the narrator keeps talking about nothing in particular for quite a while longer than anyone asked for the quick brown fox jumps over the lazy dog and keeps running through the field while the narrator keeps talking about nothing in particular for quite a while longer than anyone asked for"
+    ],
+    "accurate": true,
+    "raw_fallback": false,
+    "errors": []
+  },
+  {
+    "variant": "after",
+    "scenario": "long_multiseg",
+    "spec": "off",
+    "lane": "raw",
+    "note": "~700 chars over 4 segments",
+    "median_stop_to_ready_ms": 302,
+    "median_stop_to_final_ms": 302,
+    "chat_requests": 0,
+    "spec_label": "off",
+    "expected": "the quick brown fox jumps over the lazy dog and keeps running through the field while the narrator keeps talking about nothing in particular for quite a while longer than anyone asked for the quick brown fox jumps over the lazy dog and keeps running through the field while the narrator keeps talking about nothing in particular for quite a while longer than anyone asked for the quick brown fox jumps over the lazy dog and keeps running through the field while the narrator keeps talking about nothing in particular for quite a while longer than anyone asked for the quick brown fox jumps over the lazy dog and keeps running through the field while the narrator keeps talking about nothing in particular for quite a while longer than anyone asked for",
+    "outputs": [
+      "the quick brown fox jumps over the lazy dog and keeps running through the field while the narrator keeps talking about nothing in particular for quite a while longer than anyone asked for the quick brown fox jumps over the lazy dog and keeps running through the field while the narrator keeps talking about nothing in particular for quite a while longer than anyone asked for the quick brown fox jumps over the lazy dog and keeps running through the field while the narrator keeps talking about nothing in particular for quite a while longer than anyone asked for the quick brown fox jumps over the lazy dog and keeps running through the field while the narrator keeps talking about nothing in particular for quite a while longer than anyone asked for"
+    ],
+    "accurate": true,
+    "raw_fallback": false,
+    "errors": []
+  },
+  {
+    "variant": "before",
+    "scenario": "smart_fast",
+    "spec": "off",
+    "lane": "smart",
+    "note": "cleanup 300ms",
+    "median_stop_to_ready_ms": 459,
+    "median_stop_to_final_ms": 152,
+    "chat_requests": 1,
+    "spec_label": "off",
+    "expected": "Hello world.",
+    "outputs": [
+      "Hello world."
+    ],
+    "accurate": true,
+    "raw_fallback": false,
+    "errors": []
+  },
+  {
+    "variant": "after",
+    "scenario": "smart_fast",
+    "spec": "off",
+    "lane": "smart",
+    "note": "cleanup 300ms",
+    "median_stop_to_ready_ms": 457,
+    "median_stop_to_final_ms": 151,
+    "chat_requests": 1,
+    "spec_label": "off",
+    "expected": "Hello world.",
+    "outputs": [
+      "Hello world."
+    ],
+    "accurate": true,
+    "raw_fallback": false,
+    "errors": []
+  },
+  {
+    "variant": "after",
+    "scenario": "smart_fast",
+    "spec": "on",
+    "lane": "smart",
+    "note": "cleanup 300ms",
+    "median_stop_to_ready_ms": 306,
+    "median_stop_to_final_ms": 152,
+    "chat_requests": 1,
+    "spec_label": "hit",
+    "expected": "Hello world.",
+    "outputs": [
+      "Hello world."
+    ],
+    "accurate": true,
+    "raw_fallback": false,
+    "errors": []
+  },
+  {
+    "variant": "before",
+    "scenario": "smart_slow_clean",
+    "spec": "off",
+    "lane": "smart",
+    "note": "long text, cleanup 2s",
+    "median_stop_to_ready_ms": 2308,
+    "median_stop_to_final_ms": 301,
+    "chat_requests": 1,
+    "spec_label": "off",
+    "expected": "The quick brown fox jumps over the lazy dog and keeps running through the field while the narrator keeps talking about nothing in particular for quite a while longer than anyone asked for the quick brown fox jumps over the lazy dog and keeps running through the field while the narrator keeps talking about nothing in particular for quite a while longer than anyone asked for the quick brown fox jumps over the lazy dog and keeps running through the field while the narrator keeps talking about nothing in particular for quite a while longer than anyone asked for the quick brown fox jumps over the lazy dog and keeps running through the field while the narrator keeps talking about nothing in particular for quite a while longer than anyone asked for.",
+    "outputs": [
+      "The quick brown fox jumps over the lazy dog and keeps running through the field while the narrator keeps talking about nothing in particular for quite a while longer than anyone asked for the quick brown fox jumps over the lazy dog and keeps running through the field while the narrator keeps talking about nothing in particular for quite a while longer than anyone asked for the quick brown fox jumps over the lazy dog and keeps running through the field while the narrator keeps talking about nothing in particular for quite a while longer than anyone asked for the quick brown fox jumps over the lazy dog and keeps running through the field while the narrator keeps talking about nothing in particular for quite a while longer than anyone asked for."
+    ],
+    "accurate": true,
+    "raw_fallback": false,
+    "errors": []
+  },
+  {
+    "variant": "after",
+    "scenario": "smart_slow_clean",
+    "spec": "off",
+    "lane": "smart",
+    "note": "long text, cleanup 2s",
+    "median_stop_to_ready_ms": 2307,
+    "median_stop_to_final_ms": 301,
+    "chat_requests": 1,
+    "spec_label": "off",
+    "expected": "The quick brown fox jumps over the lazy dog and keeps running through the field while the narrator keeps talking about nothing in particular for quite a while longer than anyone asked for the quick brown fox jumps over the lazy dog and keeps running through the field while the narrator keeps talking about nothing in particular for quite a while longer than anyone asked for the quick brown fox jumps over the lazy dog and keeps running through the field while the narrator keeps talking about nothing in particular for quite a while longer than anyone asked for the quick brown fox jumps over the lazy dog and keeps running through the field while the narrator keeps talking about nothing in particular for quite a while longer than anyone asked for.",
+    "outputs": [
+      "The quick brown fox jumps over the lazy dog and keeps running through the field while the narrator keeps talking about nothing in particular for quite a while longer than anyone asked for the quick brown fox jumps over the lazy dog and keeps running through the field while the narrator keeps talking about nothing in particular for quite a while longer than anyone asked for the quick brown fox jumps over the lazy dog and keeps running through the field while the narrator keeps talking about nothing in particular for quite a while longer than anyone asked for the quick brown fox jumps over the lazy dog and keeps running through the field while the narrator keeps talking about nothing in particular for quite a while longer than anyone asked for."
+    ],
+    "accurate": true,
+    "raw_fallback": false,
+    "errors": []
+  },
+  {
+    "variant": "after",
+    "scenario": "smart_slow_clean",
+    "spec": "on",
+    "lane": "smart",
+    "note": "long text, cleanup 2s",
+    "median_stop_to_ready_ms": 2007,
+    "median_stop_to_final_ms": 302,
+    "chat_requests": 1,
+    "spec_label": "hit",
+    "expected": "The quick brown fox jumps over the lazy dog and keeps running through the field while the narrator keeps talking about nothing in particular for quite a while longer than anyone asked for the quick brown fox jumps over the lazy dog and keeps running through the field while the narrator keeps talking about nothing in particular for quite a while longer than anyone asked for the quick brown fox jumps over the lazy dog and keeps running through the field while the narrator keeps talking about nothing in particular for quite a while longer than anyone asked for the quick brown fox jumps over the lazy dog and keeps running through the field while the narrator keeps talking about nothing in particular for quite a while longer than anyone asked for.",
+    "outputs": [
+      "The quick brown fox jumps over the lazy dog and keeps running through the field while the narrator keeps talking about nothing in particular for quite a while longer than anyone asked for the quick brown fox jumps over the lazy dog and keeps running through the field while the narrator keeps talking about nothing in particular for quite a while longer than anyone asked for the quick brown fox jumps over the lazy dog and keeps running through the field while the narrator keeps talking about nothing in particular for quite a while longer than anyone asked for the quick brown fox jumps over the lazy dog and keeps running through the field while the narrator keeps talking about nothing in particular for quite a while longer than anyone asked for."
+    ],
+    "accurate": true,
+    "raw_fallback": false,
+    "errors": []
+  },
+  {
+    "variant": "before",
+    "scenario": "smart_timeout",
+    "spec": "off",
+    "lane": "smart",
+    "note": "cleanup over budget -> raw",
+    "median_stop_to_ready_ms": 1683,
+    "median_stop_to_final_ms": 151,
+    "chat_requests": 1,
+    "spec_label": "off",
+    "expected": "hello world",
+    "outputs": [
+      "hello world"
+    ],
+    "accurate": true,
+    "raw_fallback": true,
+    "errors": []
+  },
+  {
+    "variant": "after",
+    "scenario": "smart_timeout",
+    "spec": "off",
+    "lane": "smart",
+    "note": "cleanup over budget -> raw",
+    "median_stop_to_ready_ms": 1683,
+    "median_stop_to_final_ms": 151,
+    "chat_requests": 1,
+    "spec_label": "off",
+    "expected": "hello world",
+    "outputs": [
+      "hello world"
+    ],
+    "accurate": true,
+    "raw_fallback": true,
+    "errors": []
+  },
+  {
+    "variant": "after",
+    "scenario": "smart_timeout",
+    "spec": "on",
+    "lane": "smart",
+    "note": "cleanup over budget -> raw",
+    "median_stop_to_ready_ms": 1532,
+    "median_stop_to_final_ms": 151,
+    "chat_requests": 1,
+    "spec_label": "hit",
+    "expected": "hello world",
+    "outputs": [
+      "hello world"
+    ],
+    "accurate": true,
+    "raw_fallback": true,
+    "errors": []
+  },
+  {
+    "variant": "before",
+    "scenario": "resemble_reject",
+    "spec": "off",
+    "lane": "smart",
+    "note": "rewrite rejected -> raw",
+    "median_stop_to_ready_ms": 456,
+    "median_stop_to_final_ms": 151,
+    "chat_requests": 1,
+    "spec_label": "off",
+    "expected": "hello world",
+    "outputs": [
+      "hello world"
+    ],
+    "accurate": true,
+    "raw_fallback": true,
+    "errors": []
+  },
+  {
+    "variant": "after",
+    "scenario": "resemble_reject",
+    "spec": "off",
+    "lane": "smart",
+    "note": "rewrite rejected -> raw",
+    "median_stop_to_ready_ms": 456,
+    "median_stop_to_final_ms": 151,
+    "chat_requests": 1,
+    "spec_label": "off",
+    "expected": "hello world",
+    "outputs": [
+      "hello world"
+    ],
+    "accurate": true,
+    "raw_fallback": true,
+    "errors": []
+  },
+  {
+    "variant": "after",
+    "scenario": "resemble_reject",
+    "spec": "on",
+    "lane": "smart",
+    "note": "rewrite rejected -> raw",
+    "median_stop_to_ready_ms": 305,
+    "median_stop_to_final_ms": 151,
+    "chat_requests": 1,
+    "spec_label": "hit",
+    "expected": "hello world",
+    "outputs": [
+      "hello world"
+    ],
+    "accurate": true,
+    "raw_fallback": true,
+    "errors": []
+  },
+  {
+    "variant": "before",
+    "scenario": "spec_hit",
+    "spec": "off",
+    "lane": "smart",
+    "note": "partial == final",
+    "median_stop_to_ready_ms": 956,
+    "median_stop_to_final_ms": 151,
+    "chat_requests": 1,
+    "spec_label": "off",
+    "expected": "Hello world.",
+    "outputs": [
+      "Hello world."
+    ],
+    "accurate": true,
+    "raw_fallback": false,
+    "errors": []
+  },
+  {
+    "variant": "after",
+    "scenario": "spec_hit",
+    "spec": "off",
+    "lane": "smart",
+    "note": "partial == final",
+    "median_stop_to_ready_ms": 957,
+    "median_stop_to_final_ms": 151,
+    "chat_requests": 1,
+    "spec_label": "off",
+    "expected": "Hello world.",
+    "outputs": [
+      "Hello world."
+    ],
+    "accurate": true,
+    "raw_fallback": false,
+    "errors": []
+  },
+  {
+    "variant": "after",
+    "scenario": "spec_hit",
+    "spec": "on",
+    "lane": "smart",
+    "note": "partial == final",
+    "median_stop_to_ready_ms": 806,
+    "median_stop_to_final_ms": 152,
+    "chat_requests": 1,
+    "spec_label": "hit",
+    "expected": "Hello world.",
+    "outputs": [
+      "Hello world."
+    ],
+    "accurate": true,
+    "raw_fallback": false,
+    "errors": []
+  },
+  {
+    "variant": "before",
+    "scenario": "spec_miss",
+    "spec": "off",
+    "lane": "smart",
+    "note": "final grew after stop",
+    "median_stop_to_ready_ms": 3312,
+    "median_stop_to_final_ms": 2504,
+    "chat_requests": 1,
+    "spec_label": "off",
+    "expected": "Hello world and more.",
+    "outputs": [
+      "Hello world and more."
+    ],
+    "accurate": true,
+    "raw_fallback": false,
+    "errors": []
+  },
+  {
+    "variant": "after",
+    "scenario": "spec_miss",
+    "spec": "off",
+    "lane": "smart",
+    "note": "final grew after stop",
+    "median_stop_to_ready_ms": 1558,
+    "median_stop_to_final_ms": 752,
+    "chat_requests": 1,
+    "spec_label": "off",
+    "expected": "Hello world and more.",
+    "outputs": [
+      "Hello world and more."
+    ],
+    "accurate": true,
+    "raw_fallback": false,
+    "errors": []
+  },
+  {
+    "variant": "after",
+    "scenario": "spec_miss",
+    "spec": "on",
+    "lane": "smart",
+    "note": "final grew after stop",
+    "median_stop_to_ready_ms": 1555,
+    "median_stop_to_final_ms": 752,
+    "chat_requests": 2,
+    "spec_label": "miss",
+    "expected": "Hello world and more.",
+    "outputs": [
+      "Hello world and more."
+    ],
+    "accurate": true,
+    "raw_fallback": false,
+    "errors": []
+  },
+  {
+    "variant": "before",
+    "scenario": "spec_empty",
+    "spec": "off",
+    "lane": "smart",
+    "note": "nothing said before stop",
+    "median_stop_to_ready_ms": 909,
+    "median_stop_to_final_ms": 602,
+    "chat_requests": 1,
+    "spec_label": "off",
+    "expected": "Hello world.",
+    "outputs": [
+      "Hello world."
+    ],
+    "accurate": true,
+    "raw_fallback": false,
+    "errors": []
+  },
+  {
+    "variant": "after",
+    "scenario": "spec_empty",
+    "spec": "off",
+    "lane": "smart",
+    "note": "nothing said before stop",
+    "median_stop_to_ready_ms": 909,
+    "median_stop_to_final_ms": 602,
+    "chat_requests": 1,
+    "spec_label": "off",
+    "expected": "Hello world.",
+    "outputs": [
+      "Hello world."
+    ],
+    "accurate": true,
+    "raw_fallback": false,
+    "errors": []
+  },
+  {
+    "variant": "after",
+    "scenario": "spec_empty",
+    "spec": "on",
+    "lane": "smart",
+    "note": "nothing said before stop",
+    "median_stop_to_ready_ms": 909,
+    "median_stop_to_final_ms": 603,
+    "chat_requests": 1,
+    "spec_label": "skipped",
+    "expected": "Hello world.",
+    "outputs": [
+      "Hello world."
+    ],
+    "accurate": true,
+    "raw_fallback": false,
+    "errors": []
+  },
+  {
+    "variant": "before",
+    "scenario": "spec_race",
+    "spec": "off",
+    "lane": "smart",
+    "note": "cleanup faster than finalize",
+    "median_stop_to_ready_ms": 508,
+    "median_stop_to_final_ms": 402,
+    "chat_requests": 1,
+    "spec_label": "off",
+    "expected": "Hello world.",
+    "outputs": [
+      "Hello world."
+    ],
+    "accurate": true,
+    "raw_fallback": false,
+    "errors": []
+  },
+  {
+    "variant": "after",
+    "scenario": "spec_race",
+    "spec": "off",
+    "lane": "smart",
+    "note": "cleanup faster than finalize",
+    "median_stop_to_ready_ms": 456,
+    "median_stop_to_final_ms": 350,
+    "chat_requests": 1,
+    "spec_label": "off",
+    "expected": "Hello world.",
+    "outputs": [
+      "Hello world."
+    ],
+    "accurate": true,
+    "raw_fallback": false,
+    "errors": []
+  },
+  {
+    "variant": "after",
+    "scenario": "spec_race",
+    "spec": "on",
+    "lane": "smart",
+    "note": "cleanup faster than finalize",
+    "median_stop_to_ready_ms": 351,
+    "median_stop_to_final_ms": 351,
+    "chat_requests": 1,
+    "spec_label": "hit",
+    "expected": "Hello world.",
+    "outputs": [
+      "Hello world."
+    ],
+    "accurate": true,
+    "raw_fallback": false,
+    "errors": []
+  }
+]

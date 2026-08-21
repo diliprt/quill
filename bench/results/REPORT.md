@@ -153,6 +153,17 @@ with the polished text so Quill's own swap is never mistaken for a user edit.
 On-device confirmation: `vocab: edit-watch armed` then `vocab: user edit
 taught …` in Quill.log after hand-fixing a pasted word.
 
+Follow-up: `Inserter.encourageAXExposure()` now sets Electron's documented
+`AXManualAccessibility` opt-in on the frontmost app when a field read fails
+(edit-watch snapshot and polish swap), then retries once. Electron apps
+(Slack, Notion, ChatGPT desktop, VS Code/Cursor) build their AX tree lazily —
+this wakes it up, extending edit-learning and polish-in-place to them. Other
+apps reject the unknown attribute (harmless); Chromium's
+`AXEnhancedUserInterface` is deliberately NOT set (window-manager side
+effects). Terminals and truly AX-less views remain out of reach — platform
+limitation. Not testable off-macOS; on-device log line: `AX exposure
+requested for <app> — retrying read`.
+
 ## What did not improve
 
 - **Fast-server scenarios** (`fast_done`, `consolidated_fast`,

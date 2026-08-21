@@ -1680,6 +1680,10 @@ final class QuillApp: NSObject, NSApplicationDelegate {
             return
         }
 
+        // A first failure may just be a lazy Electron AX tree — wake it up
+        // so the retry has a chance.
+        if attempt == 0 { Inserter.encourageAXExposure() }
+
         let work = DispatchWorkItem { [weak self] in
             guard let self, generation == self.polishGeneration else { return }
             self.polishRetry = nil
@@ -1890,22 +1894,34 @@ final class PostInsertEditWatch {
 
         // Let paste settle, then snapshot the field.
         DispatchQueue.main.asyncAfter(deadline: .now() + settleDelay) { [weak self] in
-            guard let self, !self.original.isEmpty else { return }
-            guard let snapshot = Inserter.focusedFieldValue(), !snapshot.isEmpty else {
-                Log.write("vocab: edit-watch skipped — field not readable via Accessibility")
-                self.cancel()
+            self?.snapshotAndArm(retryAfterAXNudge: true)
+        }
+    }
+
+    /// First read failing may just mean an Electron app hasn't built its AX
+    /// tree yet — nudge it awake once and retry before giving up.
+    private func snapshotAndArm(retryAfterAXNudge: Bool) {
+        guard !original.isEmpty else { return }
+        guard let snapshot = Inserter.focusedFieldValue(), !snapshot.isEmpty else {
+            if retryAfterAXNudge, Inserter.encourageAXExposure() {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { [weak self] in
+                    self?.snapshotAndArm(retryAfterAXNudge: false)
+                }
                 return
             }
-            self.fieldBefore = snapshot
-            self.lastSeen = snapshot
-            self.ticks = 0
-            self.stableTicks = 0
-            self.sawChange = false
-            self.timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-                self?.tick()
-            }
-            Log.write("vocab: edit-watch armed for \(o.count) chars")
+            Log.write("vocab: edit-watch skipped — field not readable via Accessibility")
+            cancel()
+            return
         }
+        fieldBefore = snapshot
+        lastSeen = snapshot
+        ticks = 0
+        stableTicks = 0
+        sawChange = false
+        timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            self?.tick()
+        }
+        Log.write("vocab: edit-watch armed for \(original.count) chars")
     }
 
     private func tick() {

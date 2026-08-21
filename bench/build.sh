@@ -31,4 +31,13 @@ cp governor_test_main.swift build/gov/main.swift
   Support.swift build/gov/main.swift -o build/governor-test
 ./build/governor-test
 
+echo "→ vocabulary correction-learning test"
+mkdir -p build/vocab
+cp ../Sources/Vocabulary.swift build/vocab/Vocabulary.swift
+python3 patch_linux.py build/vocab/Vocabulary.swift
+cp vocab_test_main.swift build/vocab/main.swift
+"$SWIFTC" -swift-version 5 build/vocab/Vocabulary.swift log_stub.swift build/vocab/main.swift \
+  -o build/vocab-test
+./build/vocab-test
+
 echo "✓ built build/harness-before and build/harness-after"

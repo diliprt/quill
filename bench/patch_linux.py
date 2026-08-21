@@ -53,6 +53,12 @@ def patch(path):
     source = source.replace(STT_URL_HARDCODED, STT_URL_ENV)
     source = source.replace(CHAT_URL_HARDCODED, CHAT_URL_ENV)
 
+    # Vocabulary.swift: AppKit is only needed for the reveal-in-Finder helper.
+    source = source.replace("import AppKit\n", "")
+    source = source.replace(
+        "        NSWorkspace.shared.activateFileViewerSelecting([fileURL])",
+        "        // NSWorkspace reveal is macOS-only (not exercised by tests).")
+
     with open(path, "w") as f:
         f.write(source)
     print(f"patched {path}")

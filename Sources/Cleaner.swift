@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 
 /// Optional cleanup pass after STT, using the same Grok Build token.
 ///
@@ -14,7 +17,11 @@ enum Cleaner {
     /// Original fast cleanup model (snappier than 4.20 in practice for this path).
     private static let model = "grok-4-1-fast-non-reasoning"
 
-    private static let endpoint = URL(string: "https://api.x.ai/v1/chat/completions")!
+    /// QUILL_CHAT_URL points this at a mock server for headless benchmarking.
+    private static let endpoint: URL = {
+        let override = ProcessInfo.processInfo.environment["QUILL_CHAT_URL"] ?? ""
+        return URL(string: override) ?? URL(string: "https://api.x.ai/v1/chat/completions")!
+    }()
 
     /// Floor / ceiling for the cleanup wait. Short phrases stay snappy; long
     /// rants get more headroom (model output time scales with transcript length).

@@ -66,7 +66,7 @@ final class Recorder {
         }
 
         converter = AVAudioConverter(from: inputFormat, to: target)
-        input.installTap(onBus: 0, bufferSize: 2048, format: inputFormat) { [weak self] buffer, _ in
+        input.installTap(onBus: 0, bufferSize: 1024, format: inputFormat) { [weak self] buffer, _ in
             self?.process(buffer)
         }
 

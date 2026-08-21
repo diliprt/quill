@@ -251,6 +251,27 @@ enum Inserter {
         }
     }
 
+    /// Ask the frontmost app to expose its Accessibility tree.
+    ///
+    /// Electron apps (Slack, Notion, ChatGPT desktop, VS Code/Cursor…) build
+    /// their AX tree lazily — only when an assistive client announces itself —
+    /// so their fields read as "not readable" until someone asks. Setting
+    /// `AXManualAccessibility` is Electron's documented opt-in for exactly
+    /// this; other apps simply reject the unknown attribute (harmless).
+    /// Deliberately NOT setting Chromium's `AXEnhancedUserInterface`, which
+    /// has known side effects with window managers.
+    @discardableResult
+    static func encourageAXExposure() -> Bool {
+        guard isTrusted, let app = NSWorkspace.shared.frontmostApplication else { return false }
+        let element = AXUIElementCreateApplication(app.processIdentifier)
+        let ok = AXUIElementSetAttributeValue(
+            element, "AXManualAccessibility" as CFString, kCFBooleanTrue) == .success
+        if ok {
+            Log.write("AX exposure requested for \(app.localizedName ?? "app") — retrying read")
+        }
+        return ok
+    }
+
     /// Replace the just-inserted raw transcript with its polished version, in
     /// place, without touching the clipboard or posting keystrokes. Succeeds only
     /// when the focused field is AX-writable, not a secure field, and still ENDS

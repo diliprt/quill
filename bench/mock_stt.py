@@ -111,6 +111,17 @@ SCENARIOS = {
         "post": [(100, partial(0, "hello world.", speech_final=True, is_final=True)),
                  (500, done())],
     },
+    # Real-server pathology behind the reported head clipping: the first pass
+    # after audio.done misses the head of the utterance and is speech_final;
+    # the server re-emits the SAME segment ~1s later with the head recovered.
+    "late_head": {
+        "pre": [],
+        "post": [(200, partial(0, "architecture to make sure we are doing the right thing",
+                               speech_final=True, is_final=True)),
+                 (1000, partial(0, "can we review the architecture to make sure we are doing the right thing",
+                                speech_final=True, is_final=True)),
+                 (1400, done())],
+    },
 }
 # Smart-lane scenarios share raw timelines under their own names.
 for alias, base in [

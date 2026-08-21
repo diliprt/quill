@@ -36,6 +36,8 @@ SCENARIOS = {
     "consolidated_slow": ("raw", None, "Hello, world.", "done carries better text @1.2s (beyond grace)"),
     "empty_interims":    ("raw", None, "hello world", "empty partials must not wipe text"),
     "long_multiseg":     ("raw", None, LONG_JOINED, "~700 chars over 4 segments"),
+    "late_head":         ("raw", None, "can we review the architecture to make sure we are doing the right thing",
+                          "server revises segment with missing head 1s later"),
     # smart lane
     "smart_fast":        ("smart", "delay_ms=300&mode=clean", "Hello world.", "cleanup 300ms"),
     "smart_slow_clean":  ("smart", "delay_ms=2000&mode=clean", LONG_CLEANED, "long text, cleanup 2s"),

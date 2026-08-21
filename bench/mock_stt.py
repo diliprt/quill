@@ -60,9 +60,9 @@ SCENARIOS = {
         "pre": [(800, partial(0, "hello world", speech_final=True, is_final=True))],
         "post": [(200, done("Hello, world."))],
     },
-    "consolidated_slow": {  # done carries better text, arrives late
+    "consolidated_slow": {  # done carries better text, later than the grace window
         "pre": [(800, partial(0, "hello world", speech_final=True, is_final=True))],
-        "post": [(600, done("Hello, world."))],
+        "post": [(1200, done("Hello, world."))],
     },
     "empty_interims": {  # empty partials between segments must not wipe text
         "pre": [(300, partial(0, "hello world", speech_final=True, is_final=True)),

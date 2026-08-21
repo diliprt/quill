@@ -33,7 +33,7 @@ SCENARIOS = {
     "missing_done_nosf": ("raw", None, "hello world", "no done; no speech_final"),
     "late_tail":         ("raw", None, "hello world and more", "segment lands 400ms after stop"),
     "consolidated_fast": ("raw", None, "Hello, world.", "done carries better text @200ms"),
-    "consolidated_slow": ("raw", None, "Hello, world.", "done carries better text @600ms"),
+    "consolidated_slow": ("raw", None, "Hello, world.", "done carries better text @1.2s (beyond grace)"),
     "empty_interims":    ("raw", None, "hello world", "empty partials must not wipe text"),
     "long_multiseg":     ("raw", None, LONG_JOINED, "~700 chars over 4 segments"),
     # smart lane

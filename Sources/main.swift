@@ -29,6 +29,9 @@ enum Defaults {
     /// P4: inject nearby field/window text into smart cleanup (spelling only).
     /// Default off so you can A/B latency and quality before/after enabling.
     static let cleanupNearbyContext = "cleanupNearbyContext"
+    /// Start the cleanup request on the live partial, before STT finalises.
+    /// Default off so you can A/B the latency win against the extra request.
+    static let cleanupSpeculative = "cleanupSpeculative"
     /// Learn unique personal terms into the local vocabulary file.
     static let vocabLearning = "vocabLearning"
     /// After paste, re-read the field and learn from hand edits.
@@ -54,6 +57,7 @@ enum Defaults {
             cleanupTrigger: Trigger.rightOption.rawValue,
             // Off until you enable for A/B (before = off, after = on).
             cleanupNearbyContext: false,
+            cleanupSpeculative: false,
             vocabLearning: true,
             vocabLearnFromEdits: true,
             keepHistory: true,
@@ -61,6 +65,8 @@ enum Defaults {
     }
 
     static var nearbyContextIsOn: Bool { bool(cleanupNearbyContext) }
+
+    static var speculativeCleanupIsOn: Bool { bool(cleanupSpeculative) }
 
     static func bool(_ key: String) -> Bool { UserDefaults.standard.bool(forKey: key) }
 
@@ -156,6 +162,15 @@ final class QuillApp: NSObject, NSApplicationDelegate {
     private var noiseFloor: Float = 0.02
     private var capturedSelection: Inserter.Selection?
     private var startedAt: Date?
+    /// Cleanup fired at stop-time on the partial transcript (opt-in), resolved
+    /// in `finishSession` only when the final transcript matches its input.
+    private var speculative: SpeculativeCleanup?
+
+    // Per-session latency instrumentation for the one-line summary after insert.
+    private var finishEnteredAt: Date?
+    private var cleanupSeconds: TimeInterval = 0
+    private var laneLabel = "raw"
+    private var speculativeLabel = "off"
 
     private var silenceTimer: Timer?
     private var maxDurationTimer: Timer?
@@ -195,6 +210,15 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         Defaults.register()
         NSApp.setActivationPolicy(.accessory)
         buildStatusItem()
+
+        // Throwaway hit on api.x.ai so DNS and the TLS session are already cached
+        // when the first dictation opens the speech-to-text socket. The response
+        // is irrelevant — only the connection state it leaves behind matters.
+        if let host = URL(string: "https://api.x.ai/") {
+            var warmup = URLRequest(url: host)
+            warmup.timeoutInterval = 5
+            URLSession.shared.dataTask(with: warmup) { _, _, _ in }.resume()
+        }
 
         hud.onClick = { [weak self] in
             guard let self else { return }
@@ -445,6 +469,18 @@ final class QuillApp: NSObject, NSApplicationDelegate {
             + "window title, and selection (not passwords) to fix name spellings. "
             + "Off = previous behaviour. Toggle anytime for A/B timing."
         cleanupMenu.addItem(nearbyItem)
+        let speculativeItem = NSMenuItem(
+            title: "Start cleanup before transcript is final",
+            action: #selector(toggleSpeculativeCleanup),
+            keyEquivalent: ""
+        )
+        speculativeItem.target = self
+        speculativeItem.state = Defaults.speculativeCleanupIsOn ? .on : .off
+        speculativeItem.isEnabled = Defaults.cleanupIsOn
+        speculativeItem.toolTip = "Fires the Grok cleanup while the transcript is still "
+            + "finalising, using the live text. Faster smart inserts; if the final "
+            + "transcript differs, a second request is sent. Toggle anytime for A/B."
+        cleanupMenu.addItem(speculativeItem)
         cleanupMenu.addItem(.separator())
         let smartKeyHeader = NSMenuItem(title: "Smart key (Grok cleanup)", action: nil, keyEquivalent: "")
         smartKeyHeader.isEnabled = false
@@ -722,6 +758,16 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         hud.apply(.notice(on
             ? "Nearby text for cleanup ON — smart key may use field/window for spellings"
             : "Nearby text for cleanup OFF — smart cleanup as before"))
+        hud.collapse(after: 2.5)
+    }
+
+    @objc private func toggleSpeculativeCleanup() {
+        Defaults.flip(Defaults.cleanupSpeculative)
+        let on = Defaults.speculativeCleanupIsOn
+        Log.write("cleanup speculative = \(on)")
+        hud.apply(.notice(on
+            ? "Cleanup starts as you stop — Grok works while the transcript finalises"
+            : "Cleanup starts after the final transcript — as before"))
         hud.collapse(after: 2.5)
     }
 
@@ -1041,6 +1087,7 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         pendingPCM = []
         socketReady = false
         sawAnyText = false
+        speculative = nil
         stopReason = sessionFromHold ? .hold : .hotkey
         didRunVoiceCommand = false
         lastStopCandidate = nil
@@ -1077,6 +1124,12 @@ final class QuillApp: NSObject, NSApplicationDelegate {
 
         client.connect(token: creds.token,
                        language: UserDefaults.standard.string(forKey: Defaults.language) ?? "en")
+
+        if sessionUsesCleanup {
+            // Pay for the cleanup TLS handshake now, while the user is still
+            // speaking, instead of after the transcript lands.
+            Cleaner.warm(token: creds.token)
+        }
 
         recorder.onPCM = { [weak self] data in
             guard let self else { return }
@@ -1274,6 +1327,8 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         sessionFromHold = false
         sessionUsesCleanup = false
         holdCommitted = false
+        // A result for THIS session's words must never surface in a later one.
+        speculative = nil
         pendingVoiceStop?.cancel()
         pendingVoiceStop = nil
         pauseTimer?.invalidate()
@@ -1364,11 +1419,43 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         finaliseStartedAt = Date()
         logAudioState()
         hud.apply(.thinking)
+        if sessionUsesCleanup, Defaults.speculativeCleanupIsOn { startSpeculativeCleanup() }
         stt?.finish()
+    }
+
+    /// Send the cleanup request now, on the transcript as it stands, so Grok
+    /// works in parallel with STT finalisation. `finishSession` throws the result
+    /// away unless the final transcript is exactly what was sent.
+    private func startSpeculativeCleanup() {
+        let snapshot = VoiceCommands.stripAll(stt?.transcript ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !snapshot.isEmpty, let creds = Auth.load() else { return }
+        speculative = SpeculativeCleanup(input: snapshot,
+                                         token: creds.token,
+                                         context: cleanupContext())
+        Log.write("cleanup speculative fired for \(snapshot.count) chars")
+    }
+
+    /// P4: optional nearby UI context for spelling (toggle; default off for A/B).
+    /// Shared by the speculative and the final cleanup call so both send the same
+    /// thing. Main thread only.
+    private func cleanupContext() -> Inserter.CleanupContext? {
+        guard Defaults.nearbyContextIsOn else {
+            Log.write("cleanup context: skipped (toggle off)")
+            return nil
+        }
+        return Inserter.captureCleanupContext(priorSelection: capturedSelection)
     }
 
     private func finishSession(with text: String) {
         stt = nil
+        let enteredAt = Date()
+        finishEnteredAt = enteredAt
+        cleanupSeconds = 0
+        laneLabel = "raw"
+        speculativeLabel = "off"
+        let spec = speculative
+        speculative = nil
         // The command phrase must never reach the target app.
         let trimmed = VoiceCommands.stripAll(text).trimmingCharacters(in: .whitespacesAndNewlines)
         let wantsCleanup = sessionUsesCleanup
@@ -1386,27 +1473,34 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         }
 
         if wantsCleanup, let creds = Auth.load() {
+            laneLabel = "smart"
             let vocabN = Vocabulary.count()
-            // P4: optional nearby UI context for spelling (toggle; default off for A/B).
-            let useContext = Defaults.nearbyContextIsOn
-            let context: Inserter.CleanupContext? = useContext
-                ? Inserter.captureCleanupContext(priorSelection: capturedSelection)
-                : nil
-            if !useContext {
-                Log.write("cleanup context: skipped (toggle off)")
+            let hit = spec?.matches(final: trimmed) ?? false
+            if let spec, !hit {
+                Log.write("cleanup speculative miss (resent) "
+                    + "partial=\(spec.input.count) final=\(trimmed.count) chars")
             }
+            // A hit reuses the request already in flight, so only a resend needs
+            // context captured now.
+            let context: Inserter.CleanupContext? = hit ? nil : cleanupContext()
             // Length-scaled budget (short phrases stay snappy; long rants get up to ~8s).
-            let cleanupBudget = Cleaner.budgetSeconds(for: trimmed)
+            // A speculative request has been running since stop, so only what is
+            // left of its budget may still be waited on.
+            var cleanupBudget = Cleaner.budgetSeconds(for: trimmed)
+            if hit, let spec {
+                cleanupBudget = max(0.15, cleanupBudget - Date().timeIntervalSince(spec.startedAt))
+            }
             let budgetLabel = String(format: "%.1f", cleanupBudget)
             var flash = "cleaning with Grok… (≤\(budgetLabel)s)"
             if vocabN > 0 { flash = "cleaning with Grok… (\(vocabN) terms, ≤\(budgetLabel)s)" }
-            if useContext { flash += " · context" }
+            if context != nil { flash += " · context" }
             hud.flashTarget(flash, for: cleanupBudget + 0.5)
             hud.update(text: trimmed)
             var finished = false
             let apply: (Cleaner.Outcome) -> Void = { [weak self] outcome in
                 guard let self, !finished else { return }
                 finished = true
+                self.cleanupSeconds = Date().timeIntervalSince(enteredAt)
                 switch outcome {
                 case .cleaned(let polished):
                     Vocabulary.learnFromCleanup(raw: trimmed, cleaned: polished)
@@ -1424,9 +1518,22 @@ final class QuillApp: NSObject, NSApplicationDelegate {
                 apply(.failed("cleanup timed out (\(budgetLabel)s budget)"))
             }
             DispatchQueue.main.asyncAfter(deadline: .now() + cleanupBudget, execute: budgetWork)
-            Cleaner.clean(trimmed, token: creds.token, context: context) { outcome in
-                budgetWork.cancel()
-                apply(outcome)
+            if hit, let spec {
+                speculativeLabel = "hit"
+                // The closure is what keeps the speculative request alive now
+                // that the session no longer holds it.
+                spec.resolve { outcome in
+                    budgetWork.cancel()
+                    let ms = Int(Date().timeIntervalSince(spec.startedAt) * 1000)
+                    Log.write("cleanup speculative hit \(ms)ms")
+                    apply(outcome)
+                }
+            } else {
+                if spec != nil { speculativeLabel = "miss" }
+                Cleaner.clean(trimmed, token: creds.token, context: context) { outcome in
+                    budgetWork.cancel()
+                    apply(outcome)
+                }
             }
             return
         }
@@ -1498,6 +1605,7 @@ final class QuillApp: NSObject, NSApplicationDelegate {
                             + String(format: "%.2fs", Date().timeIntervalSince(started))
                             + (notedCleanup ? " (cleaned)" : ""))
                     }
+                    self.logLatencySummary()
                     self.hud.apply(.delivered(outcome.app))
                     self.hud.update(text: text)
                     self.hud.collapse(after: 0.7)
@@ -1512,12 +1620,29 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// One line per inserted dictation, so the phases can be compared across
+    /// runs without re-reading the whole log. Written only where text lands.
+    private func logLatencySummary() {
+        guard let started = finaliseStartedAt, let entered = finishEnteredAt else { return }
+        let now = Date()
+        let ms: (TimeInterval) -> Int = { Int(($0 * 1000).rounded()) }
+        Log.write("latency summary: stop→final \(ms(entered.timeIntervalSince(started)))ms"
+            + " · cleanup \(ms(cleanupSeconds))ms"
+            + " · final→insert \(ms(now.timeIntervalSince(entered)))ms"
+            + " · total \(ms(now.timeIntervalSince(started)))ms"
+            + " · lane=\(laneLabel) spec=\(speculativeLabel)")
+        finaliseStartedAt = nil
+        finishEnteredAt = nil
+    }
+
     private func abortSession(message: String) {
         Log.write("aborted — \(message)")
         isRecording = false
         sessionFromHold = false
         sessionUsesCleanup = false
         holdCommitted = false
+        // A result for THIS session's words must never surface in a later one.
+        speculative = nil
         pendingVoiceStop?.cancel()
         pendingVoiceStop = nil
         pauseTimer?.invalidate()

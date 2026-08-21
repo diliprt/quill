@@ -13,25 +13,26 @@ of 0.16–0.22s applies equally to every variant and is excluded).
 | scenario | what it exercises | before | after | after + speculative | text accuracy |
 |---|---|---|---|---|---|
 | fast_done | server finalizes 150ms after stop | 151 | 151 | — | ok / ok |
-| slow_done | `transcript.done` takes 2.5s | 2502 | **600** | — | ok / ok |
-| missing_done_sf | `done` never arrives, speech_final seen | 3000 | **600** | — | ok / ok |
+| slow_done | `transcript.done` takes 2.5s | 2503 | **2000** | — | ok / ok |
+| missing_done_sf | `done` never arrives, speech_final seen | 3000 | **2000** | — | ok / ok |
 | missing_done_nosf | `done` never arrives, no speech_final | 3000 | **2000** | — | ok / ok |
-| late_tail | last segment lands 400ms after stop | 2504 | **1002** | — | ok / ok (tail kept) |
+| late_tail | last segment lands 400ms after stop | 2503 | 2401 | — | ok / ok (tail kept) |
+| late_head | server revises segment with missing head 1s later | 1401 | 1402 | — | ok / ok (head kept) |
 | consolidated_fast | `done` carries better text at 200ms | 201 | 201 | — | ok / ok |
-| consolidated_slow | `done` carries better text at 1.2s (beyond grace) | 1203 | 600 | — | ok / **DIFF** |
+| consolidated_slow | `done` carries better text at 1.2s | 1202 | 1202 | — | ok / ok |
 | empty_interims | empty partials must not wipe text | 151 | 151 | — | ok / ok |
 | long_multiseg | ~700 chars over 4 segments | 301 | 301 | — | ok / ok |
-| smart_fast | cleanup 300ms | 458 | 457 | **304** | ok / ok / ok |
-| smart_slow_clean | long text, cleanup 2s | 2308 | 2308 | **2005** | ok / ok / ok |
+| smart_fast | cleanup 300ms | 457 | 456 | **303** | ok / ok / ok |
+| smart_slow_clean | long text, cleanup 2s | 2306 | 2306 | **2004** | ok / ok / ok |
 | smart_timeout | cleanup over budget → raw | 1683 | 1683 | 1532 | ok / ok / ok |
-| resemble_reject | over-rewrite rejected → raw | 457 | 456 | **304** | ok / ok / ok |
-| spec_hit | partial == final, cleanup 800ms | 957 | 957 | **804** | ok / ok / ok |
-| spec_miss | transcript grew after stop | 3310 | **1807** | 1805 (2 requests) | ok / ok / ok |
-| spec_empty | nothing said before stop → spec skipped | 908 | 908 | 908 | ok / ok / ok |
-| spec_race | cleanup (100ms) faster than finalize | 507 | 507 | **402** | ok / ok / ok |
-| fastpath_clean | STT already formatted the sentence | 456 | **151** (0 requests) | 153 (0 requests) | ok / ok / ok |
-| fastpath_lower | unformatted → must still use model | 457 | 456 | 303 | ok / ok / ok |
-| resemble_filler | filler-heavy speech, correct cleanup shrinks | 456 | 456 | 303 | **DIFF** / ok / ok |
+| resemble_reject | over-rewrite rejected → raw | 456 | 457 | **304** | ok / ok / ok |
+| spec_hit | partial == final, cleanup 800ms | 956 | 956 | **803** | ok / ok / ok |
+| spec_miss | transcript grew after stop | 3313 | 3207 | 3204 (2 requests) | ok / ok / ok |
+| spec_empty | nothing said before stop → spec skipped | 906 | 906 | 906 | ok / ok / ok |
+| spec_race | cleanup (100ms) faster than finalize | 506 | 506 | **402** | ok / ok / ok |
+| fastpath_clean | STT already formatted the sentence | 457 | **151** (0 requests) | 153 (0 requests) | ok / ok / ok |
+| fastpath_lower | unformatted → must still use model | 455 | 455 | 303 | ok / ok / ok |
+| resemble_filler | filler-heavy speech, correct cleanup shrinks | 455 | 455 | 303 | **DIFF** (old bug) / ok / ok |
 | spec_norm_hit | final transcript gains a trailing period | 1306 | 1306 | **803** (1 request) | ok / ok / ok |
 
 ## What improved
@@ -96,6 +97,36 @@ of 0.16–0.22s applies equally to every variant and is excluded).
    deterministic assertions in `bench/governor_test_main.swift`
    (run as part of `bench/build.sh`).
 
+## Round 4: head-clipping regression — reproduced, fixed
+
+On-device reports after the first build of this branch: leading words dropped
+("Can we review the Architecture…" → "Architecture…"). Reproduced in the
+harness with the `late_head` scenario: after `audio.done`, the server's first
+pass misses the opening words and is `speech_final`; it re-emits the SAME
+segment ~1s later with the head recovered. The speech_final early-finalize
+(0.6s grace) completed before that revision arrived — the pre-PR code, waiting
+for `transcript.done`, kept the full sentence. Exact repro: after-code returned
+"architecture to make sure we are doing the right thing", before-code returned
+the full "can we review the architecture to make sure we are doing the right
+thing".
+
+Fixes, all verified by the matrix above:
+- **speech_final early finalize is now OFF by default** (`earlyFinalizeGrace`
+  defaults to 0 = disabled; re-enable for experiments via `defaults write`).
+- **The fallback timer is now a quiet window**: 2.0s, restarted on EVERY
+  partial after `audio.done` (6.0s hard cap). An actively-revising server is
+  never cut off; a silent line still completes 1s sooner than the old fixed
+  3.0s.
+- **Tail-only `transcript.done` guard**: a non-empty done shorter than ~90% of
+  the accumulated partials no longer replaces them wholesale.
+- **Mic tap buffer reverted 1024 → 2048** — it shipped alongside the reported
+  quality drop and its ~20ms benefit is not worth audio-path risk.
+
+Net effect vs the aggressive round-3 numbers: pathological finalize waits
+settle at 2000ms instead of 600ms — still better than the pre-PR 2500–3000ms —
+and every accuracy scenario now passes, including the two that previously
+documented deliberate trades (`late_head`, `consolidated_slow`).
+
 ## What did not improve
 
 - **Fast-server scenarios** (`fast_done`, `consolidated_fast`,
@@ -121,17 +152,17 @@ server change starts populating it, raise `earlyFinalizeGrace`.
 
 | change | verdict | why |
 |---|---|---|
-| Early finalize + 0.35s grace | **Keep** | 2.1–2.65s saved on slow finalizes; only regression is on a server behavior not observed in production. |
-| Fallback 3s → 2s | **Keep** | 1s saved in the no-signal worst case; still double the grace window. |
+| Early finalize on speech_final | **Removed (default off)** | Clipped the head of real dictations (round 4); replaced by the activity-aware quiet window. |
+| Quiet-window fallback (2s, activity-reset, 6s cap) | **Keep** | 1s faster than the old fixed 3s when the line is quiet; never cuts off a server mid-revision. |
 | Speculative cleanup toggle | **Keep, default off** | 150–300ms consistent smart-lane win, never wrong text; extra request on a miss is why it stays opt-in. Turn it on and watch `spec=hit/miss` in the log — if your miss rate is low, leave it on. |
 | Cleanup warm at smart key-down | **Keep, verify on-device** | Not measurable against localhost mocks. Mechanism is sound and your own logs measured ~1.9s cold vs ~0.8–0.9s warm; confirm via `cleanup ok … ms` before/after on the Mac. Revert if no delta. |
 | Launch warm-up of api.x.ai | **Keep, verify on-device** | Same: costs one throwaway request at launch, expected to shave several hundred ms off the *first* dictation only. |
-| Mic buffer 2048 → 1024 | **Keep, watch CPU** | ~21ms shaved off audio delivery; not exercised by this harness (no mic on the VM). If a Mac ever shows audio glitches, revert first. |
+| Mic buffer 2048 → 1024 | **Reverted** | Shipped alongside the reported quality drop; ~20ms was never worth audio-path risk. |
 | Latency summary log line | **Keep** | It is the on-device instrument for everything above. |
 | Local fast-path (already-clean) | **Keep** | 3× faster and 0 requests on formatted short phrases; conservative gate leaves everything else on the model path. Only fires if the real STT emits formatted text — check `spec=local` in the log. |
 | Filler-aware resemble guard | **Keep** | Fixes a real bug: correct cleanups of filler-heavy speech were being rejected and the fillers pasted back. |
 | Normalized speculative matching | **Keep** | Converts trailing-punctuation/whitespace near-misses into hits; word content must still match exactly. |
-| Grace 0.6s + early-finalize logging | **Keep, tune on-device** | Quality-first rebalance after the reported drop; raise via `defaults write` if logs still show clipped tails. |
+| Early-finalize / finalize logging | **Keep** | `early finalize`, `finalize hard cap`, and `transcript.done shorter…` log lines make finalize behavior visible on-device. |
 | Eager insert (paste raw, polish in place) | **Keep, default off** | Raw-lane speed with polish arriving in place; guarded so it never touches a field the user has typed into. Needs on-device validation across apps (Electron fields may refuse the AX swap — raw text stays, which is the safe failure). |
 | Speculation governor | **Keep** | Makes the speculative toggle self-managing; logic unit-tested, watch `spec=paused` in the log. |
 

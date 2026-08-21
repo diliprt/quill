@@ -66,7 +66,10 @@ final class Recorder {
         }
 
         converter = AVAudioConverter(from: inputFormat, to: target)
-        input.installTap(onBus: 0, bufferSize: 1024, format: inputFormat) { [weak self] buffer, _ in
+        // 2048 restored: halving it to 1024 shipped alongside a reported
+        // transcription-quality drop; the ~20ms it saved is not worth any risk
+        // on the audio path.
+        input.installTap(onBus: 0, bufferSize: 2048, format: inputFormat) { [weak self] buffer, _ in
             self?.process(buffer)
         }
 

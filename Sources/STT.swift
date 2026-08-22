@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 
 /// Streaming speech-to-text over the same socket Grok Build's /voice uses.
 ///
@@ -39,6 +42,44 @@ final class STTClient: NSObject, URLSessionWebSocketDelegate {
     private var socketOpen = false
     private var finishRequested = false
 
+    /// Main-queue state for early finalisation. `speech_final` on the last
+    /// meaningful partial means the server thinks the utterance is over, so the
+    /// remaining wait for `transcript.done` is dead time.
+    private var lastPartialSpeechFinal = false
+    private var haveTranscriptText = false
+    private var doneSent = false
+    private var earlyTimer: Timer?
+    /// OFF by default (0 disables). Completing on speech_final clipped the HEAD
+    /// of real dictations: the server's first pass after audio.done can miss the
+    /// opening words and re-emit the same segment ~1s later with them recovered —
+    /// a revision an early completion never sees ("Can we review the architecture…"
+    /// arrived as "architecture…", speech_final, then the full text 800ms later).
+    /// The quiet-window fallback below is the safe fast path instead. Re-enable
+    /// for experiments with `defaults write com.freeze.quill earlyFinalizeGrace -float 0.6`.
+    private let earlyFinalizeGrace: TimeInterval = {
+        if let raw = ProcessInfo.processInfo.environment["QUILL_EARLY_GRACE"],
+           let seconds = Double(raw) {
+            return seconds
+        }
+        return UserDefaults.standard.double(forKey: "earlyFinalizeGrace")
+    }()
+
+    /// After audio.done: complete once the server has been QUIET this long.
+    /// Restarted on every partial, so an actively-revising server is never cut
+    /// off (the old fixed timer was), while a silent line finishes sooner than
+    /// the old 3.0s wait.
+    private let quietWindow: TimeInterval = {
+        if let raw = ProcessInfo.processInfo.environment["QUILL_QUIET_WINDOW"],
+           let seconds = Double(raw) {
+            return seconds
+        }
+        let configured = UserDefaults.standard.double(forKey: "sttQuietWindow")
+        return configured > 0 ? configured : 2.0
+    }()
+    /// Absolute ceiling from audio.done, however chatty the server is.
+    private let hardCap: TimeInterval = 6.0
+    private var hardCapTimer: Timer?
+
     /// Best transcript so far — fires on every partial.
     var onText: (String) -> Void = { _ in }
     /// The socket is up and audio is being accepted.
@@ -61,7 +102,9 @@ final class STTClient: NSObject, URLSessionWebSocketDelegate {
     }
 
     func connect(token: String, language: String) {
-        var components = URLComponents(string: "wss://api.x.ai/v1/stt")!
+        // QUILL_STT_URL points this at a mock socket for headless benchmarking.
+        let endpoint = ProcessInfo.processInfo.environment["QUILL_STT_URL"]
+            ?? "wss://api.x.ai/v1/stt"
         var items: [URLQueryItem] = [
             .init(name: "sample_rate", value: "16000"),
             .init(name: "encoding", value: "pcm"),
@@ -70,9 +113,21 @@ final class STTClient: NSObject, URLSessionWebSocketDelegate {
         if !language.isEmpty, language != "auto" {
             items.append(.init(name: "language", value: language))
         }
+        guard var components = URLComponents(string: endpoint) else {
+            DispatchQueue.main.async { [weak self] in
+                self?.onFailure(.server("Bad speech-to-text endpoint: \(endpoint)"))
+            }
+            return
+        }
         components.queryItems = items
+        guard let url = components.url else {
+            DispatchQueue.main.async { [weak self] in
+                self?.onFailure(.server("Bad speech-to-text endpoint: \(endpoint)"))
+            }
+            return
+        }
 
-        var request = URLRequest(url: components.url!)
+        var request = URLRequest(url: url)
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         request.timeoutInterval = 20
 
@@ -111,16 +166,51 @@ final class STTClient: NSObject, URLSessionWebSocketDelegate {
         task?.send(.string(#"{"type":"audio.done"}"#)) { _ in }
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
-            self.doneTimer?.invalidate()
-            self.doneTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: false) { [weak self] _ in
-                self?.complete()
+            self.doneSent = true
+            self.restartQuietTimer()
+            self.hardCapTimer?.invalidate()
+            self.hardCapTimer = Timer.scheduledTimer(withTimeInterval: self.hardCap, repeats: false) { [weak self] _ in
+                guard let self, !self.didFinish else { return }
+                Log.write("finalize hard cap — server still sending after \(self.hardCap)s")
+                self.complete()
             }
+            // speech_final may already have arrived before the user stopped.
+            self.scheduleEarlyFinalizeIfReady()
+        }
+    }
+
+    /// Main queue only. Every partial after audio.done proves the server is
+    /// still working — give it a fresh quiet window before completing.
+    private func restartQuietTimer() {
+        guard doneSent, !didFinish else { return }
+        doneTimer?.invalidate()
+        doneTimer = Timer.scheduledTimer(withTimeInterval: quietWindow, repeats: false) { [weak self] _ in
+            self?.complete()
+        }
+    }
+
+    /// Main queue only. Arms the opt-in grace window when the server has said
+    /// the utterance ended and we have something to insert. Disabled (grace 0)
+    /// by default — see `earlyFinalizeGrace`.
+    private func scheduleEarlyFinalizeIfReady() {
+        guard earlyFinalizeGrace > 0 else { return }
+        guard doneSent, !didFinish, lastPartialSpeechFinal, haveTranscriptText else { return }
+        earlyTimer?.invalidate()
+        earlyTimer = Timer.scheduledTimer(withTimeInterval: earlyFinalizeGrace, repeats: false) { [weak self] _ in
+            guard let self, !self.didFinish else { return }
+            let seconds = String(format: "%.2f", self.earlyFinalizeGrace)
+            Log.write("early finalize — no transcript.done within \(seconds)s of speech_final")
+            self.complete()
         }
     }
 
     func cancel() {
         didFinish = true
         doneTimer?.invalidate()
+        earlyTimer?.invalidate()
+        earlyTimer = nil
+        hardCapTimer?.invalidate()
+        hardCapTimer = nil
         task?.cancel(with: .goingAway, reason: nil)
         task = nil
         session?.invalidateAndCancel()
@@ -130,6 +220,10 @@ final class STTClient: NSObject, URLSessionWebSocketDelegate {
         guard !didFinish else { return }
         didFinish = true
         doneTimer?.invalidate()
+        earlyTimer?.invalidate()
+        earlyTimer = nil
+        hardCapTimer?.invalidate()
+        hardCapTimer = nil
         let text = transcript
         task?.cancel(with: .normalClosure, reason: nil)
         task = nil
@@ -162,10 +256,27 @@ final class STTClient: NSObject, URLSessionWebSocketDelegate {
 
         switch type {
         case "transcript.partial":
-            record(start: (object["start"] as? Double) ?? 0,
-                   text: (object["text"] as? String) ?? "")
+            let text = (object["text"] as? String) ?? ""
+            record(start: (object["start"] as? Double) ?? 0, text: text)
             let snapshot = transcript
-            DispatchQueue.main.async { [weak self] in self?.onText(snapshot) }
+            let carriesText = !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            let speechFinal = (object["speech_final"] as? Bool) ?? false
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.onText(snapshot)
+                // Any partial is proof the server is still working — even a
+                // buffer-clearing empty one. Give it a fresh quiet window so a
+                // late head/tail revision is never cut off mid-delivery.
+                self.restartQuietTimer()
+                // Empty partials say nothing about whether speech ended.
+                guard carriesText else { return }
+                self.lastPartialSpeechFinal = speechFinal
+                self.haveTranscriptText = true
+                // More speech arrived: the previous grace window is stale.
+                self.earlyTimer?.invalidate()
+                self.earlyTimer = nil
+                self.scheduleEarlyFinalizeIfReady()
+            }
 
         case "transcript.created":
             break
@@ -173,10 +284,15 @@ final class STTClient: NSObject, URLSessionWebSocketDelegate {
         case "transcript.done":
             let text = ((object["text"] as? String) ?? "")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-            if !text.isEmpty {
-                // Server sent a consolidated transcript — prefer it wholesale.
+            // Prefer a consolidated transcript wholesale — but never let a
+            // tail-only done clobber a longer accumulation (defensive: the
+            // live endpoint sends done with empty text).
+            if !text.isEmpty, Double(text.count) >= Double(transcript.count) * 0.9 {
                 segmentOrder = [-1]
                 segments = [-1: text]
+            } else if !text.isEmpty {
+                Log.write("transcript.done shorter than accumulated partials — keeping partials"
+                    + " (\(text.count) vs \(transcript.count) chars)")
             }
             complete()
 

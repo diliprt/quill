@@ -1537,11 +1537,6 @@ final class QuillApp: NSObject, NSApplicationDelegate {
             return
         }
 
-        // Head-loss debugging: this is what STT actually delivered, BEFORE any
-        // cleanup. If the opening words are missing here, they were never
-        // transcribed (audio/server side) — cleanup never saw them.
-        Log.write("final transcript (\(trimmed.count) chars): \"\(String(trimmed.prefix(80)))\"")
-
         if wantsCleanup, let creds = Auth.load() {
             laneLabel = "smart"
             // Already formatted and structurally trivial: the corrector would be

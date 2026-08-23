@@ -182,6 +182,7 @@ enum Cleaner {
                 guard resembles(original: original, candidate: out) else {
                     let ms = Int(Date().timeIntervalSince(started) * 1000)
                     Log.write("cleanup rejected (resemble) model=\(model) \(ms)ms — using raw \(contextNote)")
+                    Log.write("cleanup rejected preview: \"\(original.prefix(60))\" → \"\(out.prefix(60))\"")
                     DispatchQueue.main.async { completion(.failed("result did not resemble the original")) }
                     return
                 }
@@ -189,6 +190,7 @@ enum Cleaner {
                 Log.write("cleanup ok model=\(model) chars \(original.count)→\(out.count) \(ms)ms"
                     + (vocabBlock.isEmpty ? "" : " vocab=\(Vocabulary.count())")
                     + " \(contextNote)")
+                Log.write("cleanup preview: \"\(original.prefix(60))\" → \"\(out.prefix(60))\"")
                 DispatchQueue.main.async { completion(.cleaned(out)) }
             case .failed(let message):
                 let ms = Int(Date().timeIntervalSince(started) * 1000)

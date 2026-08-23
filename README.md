@@ -42,7 +42,7 @@ Additions on top of upstream (menu-bar right-click → settings):
 | **Right ⌥ / Right ⌘** | **0.22s** | Dedicated dictation keys (P3 — snappier). |
 | **F5** | 0.28s | — |
 | **Control ⌃** | 0.45s | Shared with Grok Build / system chords. |
-| **🌐 (fn)** | **0.22s** | Dedicated dictation key; release debounced (0.12s) for flaky Globe up-events. |
+| **🌐 (fn)** | **0.22s** | Dedicated dictation key; release debounced (0.12s) for flaky Globe up-events. System Globe action forced to *Do Nothing* whenever 🌐 is any trigger. |
 
 Mic + listening HUD arm on **key-down**; the delay only decides commit vs discard. Release before commit, chords, or Escape → no insert.
 

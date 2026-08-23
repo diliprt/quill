@@ -245,6 +245,9 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         hud.install()
 
         applyTriggersAndGesture()
+        // Re-assert at launch: the setting can be reset by OS updates, and older
+        // builds never wrote it when 🌐 was only the smart key.
+        neutralizeGlobeActionIfUsed()
         // Hold mode only fires onHold*; onTrigger is for tap modes / pill / menu.
         hotkey.onTrigger = { [weak self] lane in
             guard let self else { return }
@@ -730,19 +733,27 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         Defaults.setPrimaryTrigger(option)
         applyTriggersAndGesture()
         Log.write("simple trigger set to \(option.rawValue)")
-
-        if option == .fnGlobe {
-            // A bare 🌐 press normally shows emoji or switches input source; that
-            // would fire twice on a double-tap. Point it at nothing.
-            UserDefaults.standard.set(0, forKey: "AppleFnUsageType")
-            let task = Process()
-            task.launchPath = "/usr/bin/defaults"
-            task.arguments = ["write", "com.apple.HIToolbox", "AppleFnUsageType", "-int", "0"]
-            try? task.run()
-        }
+        neutralizeGlobeActionIfUsed()
 
         hud.apply(.notice("Simple: \(option.gesture(mode: Defaults.currentGesture))"))
         hud.collapse(after: 2.5)
+    }
+
+    /// A bare 🌐 press normally shows emoji, switches input source, or starts
+    /// system dictation — each fires on key-down and can steal focus or the mic
+    /// exactly when the first words are spoken. Point it at nothing whenever 🌐
+    /// is ANY Quill trigger. Previously only the primary key did this; choosing
+    /// 🌐 as the smart key never neutralized the system action.
+    private func neutralizeGlobeActionIfUsed() {
+        let used = Defaults.currentTrigger == .fnGlobe
+            || (Defaults.cleanupIsOn && Defaults.smartTrigger == .fnGlobe)
+        guard used else { return }
+        UserDefaults.standard.set(0, forKey: "AppleFnUsageType")
+        let task = Process()
+        task.launchPath = "/usr/bin/defaults"
+        task.arguments = ["write", "com.apple.HIToolbox", "AppleFnUsageType", "-int", "0"]
+        try? task.run()
+        Log.write("🌐 system action set to Do Nothing (AppleFnUsageType=0)")
     }
 
     @objc private func setSmartTrigger(_ sender: NSMenuItem) {
@@ -750,6 +761,7 @@ final class QuillApp: NSObject, NSApplicationDelegate {
               let option = Trigger(rawValue: raw) else { return }
         Defaults.setSmartTrigger(option)
         applyTriggersAndGesture()
+        neutralizeGlobeActionIfUsed()
         Log.write("smart trigger set to \(Defaults.smartTrigger.rawValue)")
         hud.apply(.notice("Cleaned: \(Defaults.smartTrigger.gesture(mode: Defaults.currentGesture))"))
         hud.collapse(after: 2.5)
@@ -1524,6 +1536,11 @@ final class QuillApp: NSObject, NSApplicationDelegate {
             }
             return
         }
+
+        // Head-loss debugging: this is what STT actually delivered, BEFORE any
+        // cleanup. If the opening words are missing here, they were never
+        // transcribed (audio/server side) — cleanup never saw them.
+        Log.write("final transcript (\(trimmed.count) chars): \"\(String(trimmed.prefix(80)))\"")
 
         if wantsCleanup, let creds = Auth.load() {
             laneLabel = "smart"

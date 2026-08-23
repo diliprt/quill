@@ -25,7 +25,7 @@ for ARCH in arm64 x86_64; do
     -O \
     -target "$ARCH-apple-macos12.0" \
     -sdk "$SDK" \
-    -framework Cocoa -framework AVFoundation -framework QuartzCore \
+    -framework Cocoa -framework AVFoundation -framework QuartzCore -framework ScreenCaptureKit \
     Sources/*.swift \
     -o "$BUILD/$APP_NAME-$ARCH"
 done
@@ -49,6 +49,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>LSUIElement</key><true/>
   <key>NSMicrophoneUsageDescription</key>
   <string>Quill records your voice and streams it to Grok speech-to-text, using your Grok Build session.</string>
+  <key>NSScreenCaptureUsageDescription</key>
+  <string>Quill captures the screen areas you circle while dictating.</string>
   <key>NSHumanReadableCopyright</key><string>freeze</string>
 </dict>
 </plist>

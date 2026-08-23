@@ -40,6 +40,8 @@ enum Defaults {
     static let vocabLearnFromEdits = "vocabLearnFromEdits"
     /// Store recent transcripts in preferences (plaintext — optional).
     static let keepHistory = "keepHistory"
+    /// Draw a circle on screen while dictating to capture that region (BetterVoice-style).
+    static let circleCapture = "circleCapture"
 
     static func register() {
         UserDefaults.standard.register(defaults: [
@@ -64,8 +66,11 @@ enum Defaults {
             vocabLearning: true,
             vocabLearnFromEdits: true,
             keepHistory: true,
+            circleCapture: false,
         ])
     }
+
+    static var circleCaptureIsOn: Bool { bool(circleCapture) }
 
     static var nearbyContextIsOn: Bool { bool(cleanupNearbyContext) }
 
@@ -190,6 +195,7 @@ final class QuillApp: NSObject, NSApplicationDelegate {
 
     /// Watches the focused field after paste so hand-edits teach the dictionary.
     private let editWatch = PostInsertEditWatch()
+    private let circleCapture = CircleCaptureSession()
 
     /// QUILL_SELFTEST=<file.pcm> replaces the microphone with a 16 kHz mono PCM16
     /// file, so the socket → transcript → insert path can be verified headlessly.
@@ -608,6 +614,8 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         appearanceMenu.autoenablesItems = false
         addToggle(to: appearanceMenu, title: "Show idle pill", key: Defaults.cornerButton,
                   action: #selector(toggleCornerButton))
+        addToggle(to: appearanceMenu, title: "Circle to capture screen context", key: Defaults.circleCapture,
+                  action: #selector(toggleCircleCapture))
         let resetItem = NSMenuItem(title: "Reset panel position",
                                    action: #selector(resetPanelPosition), keyEquivalent: "")
         resetItem.target = self
@@ -945,6 +953,16 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         }
     }
 
+    @objc private func toggleCircleCapture() {
+        Defaults.flip(Defaults.circleCapture)
+        let on = Defaults.circleCaptureIsOn
+        Log.write("circle capture \(on ? "enabled" : "disabled")")
+        hud.apply(.notice(on
+            ? "Circle capture on — draw a circle while dictating"
+            : "Circle capture off"))
+        hud.collapse(after: 2.5)
+    }
+
     @objc private func setLanguage(_ sender: NSMenuItem) {
         guard let code = sender.representedObject as? String else { return }
         UserDefaults.standard.set(code, forKey: Defaults.language)
@@ -1240,6 +1258,23 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         if !sessionFromHold { startPauseWatch() }
         Log.write("recording started — watchClicks=\(hotkey.watchClicks) fromHold=\(sessionFromHold) committed=\(holdCommitted) cleanup=\(sessionUsesCleanup)")
 
+        if Defaults.circleCaptureIsOn {
+            do {
+                try circleCapture.start()
+                circleCapture.beginTracking(onGesture: { [weak self] count in
+                    self?.hud.flashTarget("capture \(count)", for: 1.2)
+                }, onError: { [weak self] error in
+                    Log.write("circle capture: \(error.localizedDescription)")
+                    if case .screenPermissionRequired = error {
+                        Inserter.openPrivacyPane("Privacy_ScreenCapture")
+                        self?.hud.flashTarget("grant Screen Recording for circle capture", for: 4)
+                    }
+                })
+            } catch {
+                Log.write("circle capture start failed — \(error.localizedDescription)")
+            }
+        }
+
         tickTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
             guard let self, let startedAt = self.startedAt else { return }
             self.hud.update(elapsed: Date().timeIntervalSince(startedAt))
@@ -1391,6 +1426,7 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         hotkey.resetHoldState()
         invalidateTimers()
         recorder.stop()
+        circleCapture.discard()
         stt?.cancel()
         stt = nil
         refreshIcon()
@@ -1455,6 +1491,7 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         }
         invalidateTimers()
         recorder.stop()
+        circleCapture.stopTracking()
         refreshIcon()
 
         // Never discard the session just because no partial has arrived yet — on
@@ -1527,6 +1564,7 @@ final class QuillApp: NSObject, NSApplicationDelegate {
 
         guard !trimmed.isEmpty else {
             specSnapshot = nil
+            circleCapture.discard()
             if didRunVoiceCommand {
                 hud.apply(.notice("Opened Grok Build"))
                 hud.collapse(after: 1.6)
@@ -1537,6 +1575,26 @@ final class QuillApp: NSObject, NSApplicationDelegate {
             return
         }
 
+        Task { @MainActor in
+            if Defaults.circleCaptureIsOn {
+                await circleCapture.waitForCaptures()
+            }
+            let circleImages = circleCapture.imageURLs
+            finishSessionDeliver(trimmed: trimmed,
+                                 generation: generation,
+                                 enteredAt: enteredAt,
+                                 spec: spec,
+                                 wantsCleanup: wantsCleanup,
+                                 circleImages: circleImages)
+        }
+    }
+
+    private func finishSessionDeliver(trimmed: String,
+                                      generation: Int,
+                                      enteredAt: Date,
+                                      spec: SpeculativeCleanup?,
+                                      wantsCleanup: Bool,
+                                      circleImages: [URL]) {
         if wantsCleanup, let creds = Auth.load() {
             laneLabel = "smart"
             // Already formatted and structurally trivial: the corrector would be
@@ -1545,7 +1603,7 @@ final class QuillApp: NSObject, NSApplicationDelegate {
                 specSnapshot = nil
                 speculativeLabel = "local"
                 Log.write("cleanup local fast-path — already clean (\(trimmed.count) chars)")
-                deliverInsert(trimmed, notedCleanup: false)
+                deliverInsert(trimmed, notedCleanup: false, circleImages: circleImages)
                 return
             }
 
@@ -1573,7 +1631,7 @@ final class QuillApp: NSObject, NSApplicationDelegate {
             let eagerGeneration = generation
             if eager {
                 laneLabel = "smart-eager"
-                deliverInsert(trimmed, notedCleanup: false)
+                deliverInsert(trimmed, notedCleanup: false, circleImages: circleImages)
             }
 
             // A hit reuses the request already in flight, so only a resend needs
@@ -1642,14 +1700,14 @@ final class QuillApp: NSObject, NSApplicationDelegate {
                 switch outcome {
                 case .cleaned(let polished):
                     Vocabulary.learnFromCleanup(raw: trimmed, cleaned: polished)
-                    self.deliverInsert(polished, notedCleanup: true)
+                    self.deliverInsert(polished, notedCleanup: true, circleImages: circleImages)
                 case .failed(let message):
                     Log.write("cleanup failed — using raw: \(message)")
                     let note = message.contains("timed out")
                         ? "cleanup slow — pasting raw"
                         : "cleanup failed — pasting raw"
                     self.hud.flashTarget(note, for: 2)
-                    self.deliverInsert(trimmed, notedCleanup: false)
+                    self.deliverInsert(trimmed, notedCleanup: false, circleImages: circleImages)
                 }
             }
             let budgetWork = DispatchWorkItem {
@@ -1664,7 +1722,7 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         }
 
         specSnapshot = nil
-        deliverInsert(trimmed, notedCleanup: false)
+        deliverInsert(trimmed, notedCleanup: false, circleImages: circleImages)
     }
 
     /// Replace eager raw text only while this completed session still owns the field.
@@ -1716,7 +1774,7 @@ final class QuillApp: NSObject, NSApplicationDelegate {
     }
 
     /// Remember + insert into the focused field.
-    private func deliverInsert(_ text: String, notedCleanup: Bool) {
+    private func deliverInsert(_ text: String, notedCleanup: Bool, circleImages: [URL] = []) {
         // Grow the local unique-term library from what was actually inserted.
         Vocabulary.learnFromFinalText(text)
         remember(text)
@@ -1780,18 +1838,31 @@ final class QuillApp: NSObject, NSApplicationDelegate {
                             + (notedCleanup ? " (cleaned)" : ""))
                     }
                     self.logLatencySummary()
+                    self.finishCircleCapture(text: text, circleImages: circleImages)
                     self.hud.apply(.delivered(outcome.app))
                     self.hud.update(text: text)
                     self.hud.collapse(after: 0.7)
                     // Watch for hand-edits in AX-readable fields → personal dictionary.
                     self.armEditWatch(afterInserting: text)
                 case .blocked:
+                    self.finishCircleCapture(text: text, circleImages: circleImages)
                     self.hud.apply(.notice("Grant Accessibility to Quill so it can write into apps"))
                     self.hud.collapse(after: 4)
                     Inserter.requestTrust()
                 }
             }
         }
+    }
+
+    private func finishCircleCapture(text: String, circleImages: [URL]) {
+        if !circleImages.isEmpty {
+            if CircleCaptureSession.copyToClipboard(transcript: text, imageURLs: circleImages) {
+                let n = circleImages.count
+                hud.flashTarget("\(n) capture\(n == 1 ? "" : "s") on clipboard — ⌘V to attach", for: 3)
+                Log.write("circle capture: \(n) image\(n == 1 ? "" : "s") on clipboard")
+            }
+        }
+        circleCapture.discard()
     }
 
     /// One line per inserted dictation, so the phases can be compared across
@@ -1828,6 +1899,7 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         hotkey.resetHoldState()
         invalidateTimers()
         recorder.stop()
+        circleCapture.discard()
         stt?.cancel()
         stt = nil
         refreshIcon()

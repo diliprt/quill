@@ -121,6 +121,8 @@ private final class TriggerBinding {
     var holdArmed = false
     var holdActive = false
     var holdStartWork: DispatchWorkItem?
+    /// Debounced release for keys whose up/down state flickers (🌐).
+    var holdReleaseWork: DispatchWorkItem?
     var holdStartedAt: CFTimeInterval = 0
     var chordPoll: Timer?
     var f5HoldDown = false
@@ -133,6 +135,8 @@ private final class TriggerBinding {
     func resetHold() {
         holdStartWork?.cancel()
         holdStartWork = nil
+        holdReleaseWork?.cancel()
+        holdReleaseWork = nil
         chordPoll?.invalidate()
         chordPoll = nil
         holdArmed = false
@@ -145,6 +149,8 @@ private final class TriggerBinding {
     func cancelHoldArm() {
         holdStartWork?.cancel()
         holdStartWork = nil
+        holdReleaseWork?.cancel()
+        holdReleaseWork = nil
         chordPoll?.invalidate()
         chordPoll = nil
         holdArmed = false
@@ -170,14 +176,19 @@ final class DoubleTapRightCommand {
     /// Mic/HUD arm immediately on key-down (see `onHoldArm`); this delay only
     /// decides whether release inserts or discards.
     ///
-    /// Control / 🌐 share chords with Grok Build and system shortcuts → longer.
-    /// Right ⌥ / ⌘ are dedicated dictation keys → shorter (P3).
+    /// Control shares chords with Grok Build / system shortcuts → longer.
+    /// Right ⌥ / ⌘ and 🌐 are dedicated dictation keys → shorter (P3).
     private func holdStartDelay(for trigger: Trigger) -> CFTimeInterval {
         switch trigger {
-        case .control, .fnGlobe: return 0.45
-        case .rightOption, .rightCommand: return 0.22
+        case .control: return 0.45
+        case .fnGlobe, .rightOption, .rightCommand: return 0.22
         case .f5: return 0.28
         }
+    }
+    /// 🌐 often delivers a spurious flagsChanged "up" mid-hold; wait briefly and
+    /// re-check before ending the session (reported: tail clipped vs Right ⌘).
+    private func holdReleaseDebounce(for trigger: Trigger) -> CFTimeInterval {
+        trigger == .fnGlobe ? 0.12 : 0
     }
     /// After hold is committed, release sooner than this is treated as accidental (cancel).
     private let minHoldAfterStart: CFTimeInterval = 0.20
@@ -354,18 +365,44 @@ final class DoubleTapRightCommand {
 
     private func triggerKeyIsDown(_ binding: TriggerBinding) -> Bool {
         if binding.trigger == .f5 {
-            return CGEventSource.keyState(.combinedSessionState, key: CGKeyCode(Self.f5KeyCode))
+            return keyIsDown(CGKeyCode(Self.f5KeyCode))
         }
         guard let spec = binding.trigger.modifier else { return false }
-        if CGEventSource.flagsState(.combinedSessionState).contains(spec.flag) {
-            return true
-        }
-        for code in spec.keyCodes {
-            if CGEventSource.keyState(.combinedSessionState, key: CGKeyCode(code)) {
+        for source in [CGEventSourceStateID.combinedSessionState, .hidSystemState] {
+            if CGEventSource.flagsState(source).contains(spec.flag) { return true }
+            for code in spec.keyCodes where keyIsDown(CGKeyCode(code), source: source) {
                 return true
             }
         }
         return false
+    }
+
+    private func keyIsDown(_ code: CGKeyCode, source: CGEventSourceStateID = .combinedSessionState) -> Bool {
+        CGEventSource.keyState(source, key: code)
+    }
+
+    /// End a hold on key-up, debounced for 🌐 so a single flicker doesn't stop mid-sentence.
+    private func scheduleHoldReleaseIfNeeded(_ binding: TriggerBinding) {
+        let debounce = holdReleaseDebounce(for: binding.trigger)
+        guard debounce > 0 else {
+            finishHoldIfActive(binding)
+            return
+        }
+        guard binding.holdReleaseWork == nil else { return }
+        let work = DispatchWorkItem { [weak self, weak binding] in
+            guard let self, let binding else { return }
+            binding.holdReleaseWork = nil
+            guard binding.holdArmed || binding.holdActive else { return }
+            guard !self.triggerKeyIsDown(binding) else { return }
+            self.finishHoldIfActive(binding)
+        }
+        binding.holdReleaseWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + debounce, execute: work)
+    }
+
+    private func cancelHoldRelease(_ binding: TriggerBinding) {
+        binding.holdReleaseWork?.cancel()
+        binding.holdReleaseWork = nil
     }
 
     private func armHoldStart(_ binding: TriggerBinding) {
@@ -479,9 +516,11 @@ final class DoubleTapRightCommand {
     private func pollHoldChord(_ binding: TriggerBinding) {
         guard holdToTalk else { return }
         if binding.holdArmed {
-            if holdIsChorded(binding) || !triggerKeyIsDown(binding) {
+            if holdIsChorded(binding) {
                 if debugKeys { Log.write("    [keys] hold arm cancelled mid-wait (\(binding.lane.rawValue))") }
                 abortHoldArm(binding, notify: true)
+            } else if !triggerKeyIsDown(binding) {
+                scheduleHoldReleaseIfNeeded(binding)
             }
             return
         }
@@ -503,6 +542,8 @@ final class DoubleTapRightCommand {
         binding.chordPoll = nil
         binding.holdStartWork?.cancel()
         binding.holdStartWork = nil
+        binding.holdReleaseWork?.cancel()
+        binding.holdReleaseWork = nil
         binding.holdArmed = false
 
         guard wasActive else {
@@ -648,6 +689,7 @@ final class DoubleTapRightCommand {
         }
 
         if isDown {
+            cancelHoldRelease(binding)
             if holdToTalk {
                 if binding.holdActive || binding.holdArmed { return false }
                 armHoldStart(binding)
@@ -671,8 +713,7 @@ final class DoubleTapRightCommand {
 
         // Release.
         if holdToTalk {
-            finishHoldIfActive(binding)
-            // Arm already cleared in finishHoldIfActive (with cancel notify if needed).
+            scheduleHoldReleaseIfNeeded(binding)
             return false
         }
 

@@ -393,7 +393,10 @@ final class DoubleTapRightCommand {
             guard let self, let binding else { return }
             binding.holdReleaseWork = nil
             guard binding.holdArmed || binding.holdActive else { return }
-            guard !self.triggerKeyIsDown(binding) else { return }
+            guard !self.triggerKeyIsDown(binding) else {
+                Log.write("hold release ignored — \(binding.trigger.rawValue) still down (flicker)")
+                return
+            }
             self.finishHoldIfActive(binding)
         }
         binding.holdReleaseWork = work

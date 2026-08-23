@@ -5,7 +5,7 @@
 > **This repository** ([diliprt/quill](https://github.com/diliprt/quill)) is a public fork of
 > [xfreeze2/quill](https://github.com/xfreeze2/quill). Upstream behaviour is preserved; this
 > fork adds hold-to-talk, dual-key Grok cleanup, and a local personal dictionary.
-> Current fork build: **0.8.0**.
+> Current fork build: **0.8.1**.
 
 Tap a key, talk, then click into whatever window you want the words in. They appear there — at
 the end of what's already written, without touching your clipboard.
@@ -41,7 +41,8 @@ Additions on top of upstream (menu-bar right-click → settings):
 |---------|-------------------|--------|
 | **Right ⌥ / Right ⌘** | **0.22s** | Dedicated dictation keys (P3 — snappier). |
 | **F5** | 0.28s | — |
-| **Control / 🌐** | 0.45s | Shared with Grok Build / system chords. |
+| **Control ⌃** | 0.45s | Shared with Grok Build / system chords. |
+| **🌐 (fn)** | **0.22s** | Dedicated dictation key; release debounced (0.12s) for flaky Globe up-events. System Globe action forced to *Do Nothing* whenever 🌐 is any trigger. |
 
 Mic + listening HUD arm on **key-down**; the delay only decides commit vs discard. Release before commit, chords, or Escape → no insert.
 

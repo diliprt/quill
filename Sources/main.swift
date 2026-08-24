@@ -1799,10 +1799,13 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         remember(text)
         hud.update(text: text)
 
-        // Circle + speech: Alt+Tab to the target app, release the key — Quill pastes.
-        if !circleImages.isEmpty {
+        // Circle + speech: insert text first, then leave images on clipboard.
+        switch CircleDelivery.mode(circleImageCount: circleImages.count) {
+        case .textThenImagesOnClipboard:
             deliverRichPaste(text: text, circleImages: circleImages, notedCleanup: notedCleanup)
             return
+        case .plainInsert:
+            break
         }
 
         if selfTestPath != nil {
@@ -1846,15 +1849,17 @@ final class QuillApp: NSObject, NSApplicationDelegate {
 
         // After a click we wait a beat: the click still has to land, focus has to
         // settle, and the app has to place its caret before we write into it.
-        let settle: TimeInterval = {
-            switch stopReason {
-            case .click: return 0.22
-            case .hold:
-                // Circle mode: user often Alt+Tabs before release — wait for focus.
-                return Defaults.circleCaptureIsOn ? 0.32 : 0.16
-            default: return 0.16
-            }
-        }()
+        let settle = CircleDelivery.settleSeconds(
+            stop: {
+                switch stopReason {
+                case .click: return .click
+                case .hold:  return .hold
+                case .hotkey, .voice: return .other
+                }
+            }(),
+            circleCaptureEnabled: Defaults.circleCaptureIsOn,
+            deliveringCircleImages: false
+        )
 
         DispatchQueue.main.asyncAfter(deadline: .now() + settle) { [weak self] in
             guard let self else { return }
@@ -1891,47 +1896,61 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// Circle captures: paste speech + PNGs into whatever app is frontmost when
-    /// the transcript lands (Alt+Tab while holding, then release the dictation key).
+    /// Circle captures: insert speech into the frontmost app first, then leave
+    /// screenshots on the clipboard. A combined text+image ⌘V makes most paste
+    /// boxes take only the image and drop the transcript.
     private func deliverRichPaste(text: String,
                                   circleImages: [URL],
                                   notedCleanup: Bool) {
-        // Hold release may land just as focus switches — give the target app a beat.
-        let settle: TimeInterval = {
-            switch stopReason {
-            case .click: return 0.22
-            case .hold:  return 0.32
-            default:     return 0.24
-            }
-        }()
+        let settle = CircleDelivery.settleSeconds(
+            stop: {
+                switch stopReason {
+                case .click: return .click
+                case .hold:  return .hold
+                case .hotkey, .voice: return .other
+                }
+            }(),
+            circleCaptureEnabled: Defaults.circleCaptureIsOn,
+            deliveringCircleImages: true
+        )
 
         DispatchQueue.main.asyncAfter(deadline: .now() + settle) { [weak self] in
             guard let self else { return }
-            guard CircleCaptureSession.copyToClipboard(transcript: text, imageURLs: circleImages) else {
-                Log.write("circle capture: pasteboard write failed")
-                self.hud.apply(.notice("Couldn't prepare paste — try again"))
-                self.hud.collapse(after: 4)
-                self.circleCapture.discard()
-                return
-            }
-
-            Inserter.pastePreparedClipboard(restoreAfter: 1.2) { outcome in
-                if let started = self.finaliseStartedAt {
-                    Log.write("  tail: stop → rich paste in "
-                        + String(format: "%.2fs", Date().timeIntervalSince(started))
-                        + (notedCleanup ? " (cleaned)" : "")
-                        + " · \(circleImages.count) capture(s)")
-                }
-                self.logLatencySummary()
-                self.circleCapture.discard()
-
+            let selection = self.capturedSelection
+            self.capturedSelection = nil
+            Inserter.insert(text,
+                            atEndOfField: Defaults.bool(Defaults.insertAtEnd),
+                            replacing: selection) { outcome in
                 switch outcome.method {
                 case .accessibility, .clipboard:
+                    if let started = self.finaliseStartedAt {
+                        Log.write("  tail: stop → text then capture clipboard in "
+                            + String(format: "%.2fs", Date().timeIntervalSince(started))
+                            + (notedCleanup ? " (cleaned)" : "")
+                            + " · \(circleImages.count) capture(s)")
+                    }
+                    self.logLatencySummary()
                     self.hud.apply(.delivered(outcome.app))
                     self.hud.update(text: text)
+                    let imageDelay = CircleDelivery.imageClipboardDelay(
+                        textInsertedViaClipboard: outcome.method == .clipboard
+                    )
+                    DispatchQueue.main.asyncAfter(deadline: .now() + imageDelay) {
+                        if CircleCaptureSession.copyImagesToClipboard(imageURLs: circleImages) {
+                            let n = circleImages.count
+                            self.hud.flashTarget(
+                                "\(n) capture\(n == 1 ? "" : "s") on clipboard — ⌘V to attach",
+                                for: 3)
+                            Log.write("circle capture: \(n) image(s) on clipboard after text insert")
+                        }
+                        self.circleCapture.discard()
+                    }
                     self.hud.collapse(after: 0.7)
                     self.armEditWatch(afterInserting: text)
                 case .blocked:
+                    // Text couldn't land — still offer speech + images on clipboard.
+                    _ = CircleCaptureSession.copyToClipboard(transcript: text, imageURLs: circleImages)
+                    self.circleCapture.discard()
                     self.hud.apply(.notice("Grant Accessibility so Quill can paste into apps"))
                     self.hud.collapse(after: 4)
                     Inserter.requestTrust()
@@ -1943,7 +1962,6 @@ final class QuillApp: NSObject, NSApplicationDelegate {
     private func finishCircleCapture(text: String,
                                      circleImages: [URL],
                                      insertMethod: Inserter.Method) {
-        // Rich circle pastes are handled in deliverRichPaste; here we only clean up.
         circleCapture.discard()
     }
 

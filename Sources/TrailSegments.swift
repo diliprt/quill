@@ -1,5 +1,13 @@
-import CoreGraphics
 import Foundation
+#if canImport(CoreGraphics) && os(macOS)
+import CoreGraphics
+#else
+struct CGPoint: Equatable {
+    var x: Double
+    var y: Double
+}
+typealias CGFloat = Double
+#endif
 
 // Trail segment helper adapted from BetterVoice (MIT, TarunTomar122/better-voice).
 
@@ -19,11 +27,14 @@ func trailSegments(
 
     return (1..<points.count).compactMap { index in
         let gap = times[index] - times[index - 1]
-        let distance = hypot(
-            points[index].x - points[index - 1].x,
-            points[index].y - points[index - 1].y
-        )
+        let distance = trailDistance(points[index], points[index - 1])
         guard gap >= 0, gap <= maximumGap, distance <= maximumDistance else { return nil }
         return TrailSegment(from: index - 1, to: index)
     }
+}
+
+private func trailDistance(_ a: CGPoint, _ b: CGPoint) -> CGFloat {
+    let dx = a.x - b.x
+    let dy = a.y - b.y
+    return (dx * dx + dy * dy).squareRoot()
 }

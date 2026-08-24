@@ -668,17 +668,31 @@ enum Inserter {
         pasteboard.clearContents()
         pasteboard.setString(text, forType: .string)
 
+        postCommandVPaste(restoreSaved: saved, restoreAfter: 0.45, completion: completion)
+    }
+
+    /// Paste whatever is already on the general pasteboard (e.g. text + PNGs).
+    /// Used when circle capture fills the pasteboard and Quill posts ⌘V for you.
+    static func pastePreparedClipboard(restoreAfter: TimeInterval = 1.0,
+                                       completion: @escaping (Outcome) -> Void) {
+        let app = frontmostAppName()
+        let saved = snapshot(NSPasteboard.general)
+        Log.write("insert → \(app ?? "?") · rich paste (⌘V) · trusted=\(isTrusted)")
+        postCommandVPaste(restoreSaved: saved, restoreAfter: restoreAfter) {
+            Log.write("  → rich paste (⌘V posted)")
+            completion(Outcome(method: isTrusted ? .clipboard : .blocked, app: app))
+        }
+    }
+
+    private static func postCommandVPaste(restoreSaved: [Item],
+                                          restoreAfter: TimeInterval,
+                                          completion: @escaping () -> Void) {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.06) {
             pressCommandV()
-
-            // Report success as soon as the paste is on its way. The clipboard
-            // still has to be handed back, but the target app has the text by
-            // now — making the UI wait for the restore left the panel sitting
-            // there saying "Transcribing" after the words had already appeared.
             completion()
-
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) {
-                restore(saved, to: pasteboard)
+            guard restoreAfter > 0 else { return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + restoreAfter) {
+                restore(restoreSaved, to: NSPasteboard.general)
             }
         }
     }

@@ -5,7 +5,7 @@
 > **This repository** ([diliprt/quill](https://github.com/diliprt/quill)) is a public fork of
 > [xfreeze2/quill](https://github.com/xfreeze2/quill). Upstream behaviour is preserved; this
 > fork adds hold-to-talk, dual-key Grok cleanup, and a local personal dictionary.
-> Current fork build: **0.8.2**.
+> Current fork build: **0.8.3**.
 
 Tap a key, talk, then click into whatever window you want the words in. They appear there — at
 the end of what's already written, without touching your clipboard.
@@ -97,7 +97,7 @@ Menu: **Quill ▸ Clean up with Grok ▸ Use nearby text for cleanup** (requires
 
 **Current caps:** field snippet **800** chars (near caret), selection **400**, title **120**. Mechanism is **Accessibility only** (no screenshot/OCR). One laptop screen of prose is often ~**2–4k** visible chars — so 800 is local neighborhood, not full page.
 
-### Circle screen capture (v0.8.2)
+### Circle screen capture (v0.8.2+)
 
 Menu: **Quill ▸ Appearance ▸ Circle to capture screen context** (default **off**).
 

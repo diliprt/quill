@@ -88,8 +88,19 @@ final class STTClient: NSObject, URLSessionWebSocketDelegate {
     var onComplete: (String) -> Void = { _ in }
     var onFailure: (Failure) -> Void = { _ in }
 
+    /// Segments are written from the URLSession delegate queue and read from
+    /// main (speculative cleanup reads mid-stream, and `complete()` reads at the
+    /// end), so both sides take this lock. Reading a Dictionary while another
+    /// thread inserts into it can crash outright.
+    private let segmentLock = NSLock()
+
     var transcript: String {
-        segmentOrder.compactMap { segments[$0] }.joined(separator: " ")
+        segmentLock.lock()
+        defer { segmentLock.unlock() }
+        // Ordered by the segment's own start time, not arrival order: a segment
+        // whose earlier `start` shows up late belongs at the head of the
+        // utterance, not appended to the tail.
+        return segments.keys.sorted().compactMap { segments[$0] }.joined(separator: " ")
     }
 
     private func record(start: Double, text: String) {
@@ -97,11 +108,12 @@ final class STTClient: NSObject, URLSessionWebSocketDelegate {
         // Interim empties are the server clearing its buffer between segments —
         // they must never wipe text we already have.
         guard !trimmed.isEmpty else { return }
-        if segments[start] == nil { segmentOrder.append(start) }
+        segmentLock.lock()
         segments[start] = trimmed
+        segmentLock.unlock()
     }
 
-    func connect(token: String, language: String) {
+    func connect(token: String, language: String, keyterms: [String] = []) {
         // QUILL_STT_URL points this at a mock socket for headless benchmarking.
         let endpoint = ProcessInfo.processInfo.environment["QUILL_STT_URL"]
             ?? "wss://api.x.ai/v1/stt"
@@ -112,6 +124,17 @@ final class STTClient: NSObject, URLSessionWebSocketDelegate {
         ]
         if !language.isEmpty, language != "auto" {
             items.append(.init(name: "language", value: language))
+        }
+        // Bias the recogniser toward the user's own names and terms. Without
+        // this the personal dictionary only ever reached the cleanup prompt, so
+        // raw dictation kept mishearing the same words every session.
+        // Service limits: 100 terms, 50 characters each.
+        let biases = Array(keyterms.prefix(100))
+        for term in biases {
+            items.append(.init(name: "keyterm", value: term))
+        }
+        if !biases.isEmpty {
+            Log.write("stt keyterms: \(biases.count) sent (e.g. \(biases.prefix(5).joined(separator: ", ")))")
         }
         guard var components = URLComponents(string: endpoint) else {
             DispatchQueue.main.async { [weak self] in
@@ -169,11 +192,17 @@ final class STTClient: NSObject, URLSessionWebSocketDelegate {
             self.doneSent = true
             self.restartQuietTimer()
             self.hardCapTimer?.invalidate()
-            self.hardCapTimer = Timer.scheduledTimer(withTimeInterval: self.hardCap, repeats: false) { [weak self] _ in
+            // .common mode, not the default: while a menu is open or the user is
+            // dragging, the main run loop is in event-tracking and default-mode
+            // timers are suspended — which stalled finalisation entirely and
+            // left the HUD stuck on "thinking".
+            let cap = Timer(timeInterval: self.hardCap, repeats: false) { [weak self] _ in
                 guard let self, !self.didFinish else { return }
                 Log.write("finalize hard cap — server still sending after \(self.hardCap)s")
                 self.complete()
             }
+            RunLoop.main.add(cap, forMode: .common)
+            self.hardCapTimer = cap
             // speech_final may already have arrived before the user stopped.
             self.scheduleEarlyFinalizeIfReady()
         }
@@ -184,9 +213,11 @@ final class STTClient: NSObject, URLSessionWebSocketDelegate {
     private func restartQuietTimer() {
         guard doneSent, !didFinish else { return }
         doneTimer?.invalidate()
-        doneTimer = Timer.scheduledTimer(withTimeInterval: quietWindow, repeats: false) { [weak self] _ in
+        let timer = Timer(timeInterval: quietWindow, repeats: false) { [weak self] _ in
             self?.complete()
         }
+        RunLoop.main.add(timer, forMode: .common)
+        doneTimer = timer
     }
 
     /// Main queue only. Arms the opt-in grace window when the server has said
@@ -196,12 +227,14 @@ final class STTClient: NSObject, URLSessionWebSocketDelegate {
         guard earlyFinalizeGrace > 0 else { return }
         guard doneSent, !didFinish, lastPartialSpeechFinal, haveTranscriptText else { return }
         earlyTimer?.invalidate()
-        earlyTimer = Timer.scheduledTimer(withTimeInterval: earlyFinalizeGrace, repeats: false) { [weak self] _ in
+        let early = Timer(timeInterval: earlyFinalizeGrace, repeats: false) { [weak self] _ in
             guard let self, !self.didFinish else { return }
             let seconds = String(format: "%.2f", self.earlyFinalizeGrace)
             Log.write("early finalize — no transcript.done within \(seconds)s of speech_final")
             self.complete()
         }
+        RunLoop.main.add(early, forMode: .common)
+        earlyTimer = early
     }
 
     func cancel() {
@@ -216,7 +249,20 @@ final class STTClient: NSObject, URLSessionWebSocketDelegate {
         session?.invalidateAndCancel()
     }
 
+    /// Always runs on the main queue.
+    ///
+    /// Reachable from both the URLSession delegate queue (`transcript.done`,
+    /// transport failure, socket close) and the main queue (the finalize
+    /// timers). Funnelling everything through one queue is what makes the
+    /// `didFinish` check-then-act safe: two concurrent callers could otherwise
+    /// both pass it and deliver the transcript twice, which the insert path has
+    /// no guard against. It also keeps `Timer.invalidate()` on the thread that
+    /// installed the timers, as AppKit requires.
     private func complete() {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { [weak self] in self?.complete() }
+            return
+        }
         guard !didFinish else { return }
         didFinish = true
         doneTimer?.invalidate()
@@ -228,7 +274,8 @@ final class STTClient: NSObject, URLSessionWebSocketDelegate {
         task?.cancel(with: .normalClosure, reason: nil)
         task = nil
         session?.finishTasksAndInvalidate()
-        DispatchQueue.main.async { [weak self] in self?.onComplete(text) }
+        let final = text
+        onComplete(final)
     }
 
     private func receive() {
@@ -288,8 +335,9 @@ final class STTClient: NSObject, URLSessionWebSocketDelegate {
             // tail-only done clobber a longer accumulation (defensive: the
             // live endpoint sends done with empty text).
             if !text.isEmpty, Double(text.count) >= Double(transcript.count) * 0.9 {
-                segmentOrder = [-1]
+                segmentLock.lock()
                 segments = [-1: text]
+                segmentLock.unlock()
             } else if !text.isEmpty {
                 Log.write("transcript.done shorter than accumulated partials — keeping partials"
                     + " (\(text.count) vs \(transcript.count) chars)")
@@ -300,6 +348,13 @@ final class STTClient: NSObject, URLSessionWebSocketDelegate {
             let message = (object["message"] as? String)
                 ?? (object["error"] as? String)
                 ?? "Transcription error"
+            // Terminal: without this the finalize timers stayed armed and could
+            // still complete() the session, racing the failure report.
+            didFinish = true
+            doneTimer?.invalidate()
+            hardCapTimer?.invalidate()
+            task?.cancel(with: .goingAway, reason: nil)
+            task = nil
             DispatchQueue.main.async { [weak self] in self?.onFailure(.server(message)) }
 
         default:

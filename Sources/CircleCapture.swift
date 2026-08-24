@@ -19,7 +19,6 @@ enum CircleCaptureError: LocalizedError {
 }
 
 /// Captures full-display screenshots when the user draws a circle during dictation.
-@MainActor
 final class CircleCaptureSession {
     private var detector = CircleGestureDetector()
     private var mouseTimer: Timer?
@@ -28,15 +27,61 @@ final class CircleCaptureSession {
     private var captureTasks: [Task<Void, Never>] = []
     private var lastMouseLocation: CGPoint?
 
+    /// Temp root for all circle-capture sessions.
+    static var rootDirectory: URL {
+        FileManager.default.temporaryDirectory
+            .appendingPathComponent("com.freeze.quill.circle-capture", isDirectory: true)
+    }
+
     var captureCount: Int { imageURLs.count }
+
+    /// Wipe prior session folders (and any leftover circle PNGs on the pasteboard)
+    /// when a new dictation starts — no timers, no age thresholds.
+    static func purgePreviousCaptures() {
+        let fm = FileManager.default
+        let root = rootDirectory
+        guard let kids = try? fm.contentsOfDirectory(
+            at: root, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]
+        ) else {
+            clearClipboardImages()
+            return
+        }
+        var removed = 0
+        for url in kids {
+            try? fm.removeItem(at: url)
+            removed += 1
+        }
+        if removed > 0 {
+            Log.write("circle capture: purged \(removed) previous folder(s) (new dictation)")
+        }
+        clearClipboardImages()
+    }
+
+    /// Drop image types from the general pasteboard so an old circle doesn't
+    /// linger for the next ⌘V. Leaves plain text alone.
+    static func clearClipboardImages() {
+        let pb = NSPasteboard.general
+        let types = pb.types ?? []
+        let imageTypes: Set<NSPasteboard.PasteboardType> = [
+            .png, .tiff, .pdf,
+            NSPasteboard.PasteboardType("public.jpeg"),
+            NSPasteboard.PasteboardType("public.heic"),
+        ]
+        guard types.contains(where: { imageTypes.contains($0) }) else { return }
+        let text = pb.string(forType: .string)
+        pb.clearContents()
+        if let text, !text.isEmpty {
+            pb.setString(text, forType: .string)
+        }
+    }
 
     func start() throws {
         resetDetector()
         imageURLs = []
         captureTasks = []
-        let root = FileManager.default.temporaryDirectory
-            .appendingPathComponent("com.freeze.quill.circle-capture", isDirectory: true)
+        let root = Self.rootDirectory
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        Self.purgePreviousCaptures()
         folder = root.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: folder!, withIntermediateDirectories: true)
     }
@@ -51,11 +96,8 @@ final class CircleCaptureSession {
         let timer = Timer(timeInterval: 1.0 / 30, repeats: true) { [weak self] _ in
             guard let self, !samplePending else { return }
             samplePending = true
-            Task { @MainActor [weak self] in
-                samplePending = false
-                guard let self else { return }
-                self.sampleMouse(onGesture: onGesture, onError: onError)
-            }
+            self.sampleMouse(onGesture: onGesture, onError: onError)
+            samplePending = false
         }
         mouseTimer = timer
         RunLoop.main.add(timer, forMode: .common)
@@ -179,19 +221,27 @@ final class CircleCaptureSession {
                              onError: @escaping (CircleCaptureError) -> Void) {
         let now = ProcessInfo.processInfo.systemUptime
         guard let gesture = detector.add(point: quartzPoint, at: now) else { return }
-        guard folder != nil else { return }
+        guard let captureFolder = folder else { return }
+        Log.write(String(format: "circle gesture recognized r=%.0f at (%.0f, %.0f)",
+                         gesture.radius, gesture.center.x, gesture.center.y))
 
         let previous = captureTasks.last
-        let task = Task { @MainActor in
+        let nextIndex = imageURLs.count + 1
+        let task = Task {
             await previous?.value
             do {
-                let url = try await CircleScreenshot.capture(gesture: gesture, index: imageURLs.count + 1, folder: folder!)
-                imageURLs.append(url)
-                onGesture(imageURLs.count)
+                let url = try await CircleScreenshot.capture(
+                    gesture: gesture, index: nextIndex, folder: captureFolder)
+                await MainActor.run {
+                    imageURLs.append(url)
+                    Log.write("circle capture wrote \(url.lastPathComponent)"
+                        + " cropped to the circled area (\(imageURLs.count) total)")
+                    onGesture(imageURLs.count)
+                }
             } catch let error as CircleCaptureError {
-                onError(error)
+                await MainActor.run { onError(error) }
             } catch {
-                onError(.captureFailed)
+                await MainActor.run { onError(.captureFailed) }
             }
         }
         captureTasks.append(task)
@@ -206,20 +256,26 @@ private enum CircleScreenshot {
         guard let displayRegion = displayBounds(containing: gesture.center) else {
             throw CircleCaptureError.captureFailed
         }
+        // Capture what was circled, not the whole screen. A full-display grab
+        // swept in every other window — mail, password managers, the other half
+        // of the desktop — and then put it on the clipboard.
+        let region = cropRegion(for: gesture, within: displayRegion)
 
         let image: CGImage
         if #available(macOS 15.2, *) {
-            image = try await SCScreenshotManager.captureImage(in: displayRegion)
+            image = try await SCScreenshotManager.captureImage(in: region)
         } else if #available(macOS 14.0, *) {
-            image = try await captureViaShareableContent(displayRegion: displayRegion, center: gesture.center)
+            image = try await captureViaShareableContent(displayRegion: region, center: gesture.center)
         } else {
-            guard let legacy = CGDisplayCreateImage(displayID(containing: gesture.center)) else {
+            // Pre-14 has no region capture exposed to Swift, so grab the display
+            // and crop before anything is written or copied.
+            guard let full = CGDisplayCreateImage(displayID(containing: gesture.center)) else {
                 throw CircleCaptureError.captureFailed
             }
-            image = legacy
+            image = crop(full, to: region, within: displayRegion) ?? full
         }
 
-        let marked = highlight(image, target: gesture.center, region: displayRegion, radius: gesture.radius)
+        let marked = highlight(image, target: gesture.center, region: region, radius: gesture.radius)
         let url = folder.appendingPathComponent("context-\(index).png")
         let rep = NSBitmapImageRep(cgImage: marked)
         guard let data = rep.representation(using: .png, properties: [:]) else {
@@ -245,6 +301,34 @@ private enum CircleScreenshot {
         configuration.height = Int(displayRegion.height * CGFloat(display.height) / display.frame.height)
         configuration.showsCursor = false
         return try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: configuration)
+    }
+
+    /// Cut `region` out of a full-display image. `region` is in display points;
+    /// the image is in pixels, so scale by the backing factor.
+    private static func crop(_ image: CGImage, to region: CGRect, within display: CGRect) -> CGImage? {
+        guard display.width > 0, display.height > 0 else { return nil }
+        let scaleX = CGFloat(image.width) / display.width
+        let scaleY = CGFloat(image.height) / display.height
+        let rect = CGRect(x: (region.minX - display.minX) * scaleX,
+                          y: (region.minY - display.minY) * scaleY,
+                          width: region.width * scaleX,
+                          height: region.height * scaleY).integral
+        return image.cropping(to: rect)
+    }
+
+    /// The circled area plus enough margin to keep it readable in context,
+    /// clamped to the display the gesture happened on.
+    private static func cropRegion(for gesture: CircleGesture, within display: CGRect) -> CGRect {
+        let margin = max(56, gesture.radius * 0.55)
+        let half = gesture.radius + margin
+        let box = CGRect(x: gesture.center.x - half,
+                         y: gesture.center.y - half,
+                         width: half * 2,
+                         height: half * 2)
+        let clamped = box.intersection(display)
+        // A gesture at the very edge can clip to nothing usable.
+        guard !clamped.isNull, clamped.width >= 32, clamped.height >= 32 else { return display }
+        return clamped.integral
     }
 
     private static func displayBounds(containing point: CGPoint) -> CGRect? {

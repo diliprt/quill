@@ -3,12 +3,13 @@ import AVFoundation
 /// Mic capture, resampled to exactly what the STT socket wants: 16 kHz mono PCM16.
 final class Recorder {
 
-    /// Built fresh for every recording, never reused.
+    /// Built between recordings, but never carried across a permission change.
     ///
     /// An AVAudioEngine created before the microphone was granted keeps an input
     /// node that produces nothing, for the lifetime of the process. On a fresh
     /// install that is exactly the order events happen in — launch, then grant —
     /// so a long-lived engine records pure silence until the app is restarted.
+    /// `prewarm()` therefore refuses to run until the grant is in place.
     private var engine: AVAudioEngine?
     private var converter: AVAudioConverter?
     private let target = AVAudioFormat(commonFormat: .pcmFormatInt16,
@@ -17,6 +18,10 @@ final class Recorder {
                                        interleaved: true)!
 
     private(set) var isRunning = false
+    /// An engine is built and prepared, waiting for `start()`.
+    private var isPrewarmed = false
+    /// Whether the recording in progress started from a prewarmed engine.
+    private(set) var startedFromPrewarm = false
 
     // Diagnostics — enough to say WHY nothing was heard instead of guessing.
     private(set) var framesCaptured: Int = 0
@@ -45,12 +50,81 @@ final class Recorder {
         }
     }
 
+    /// Build the engine, tap and converter without opening the microphone.
+    ///
+    /// `prepare()` allocates the render resources; audio only flows — and the
+    /// system recording indicator only lights — once `start()` is called. Doing
+    /// this ahead of the keypress is what makes the first word survive: building
+    /// from scratch inside `start()` cost 90–250ms, and anything said in that
+    /// window was never recorded at all ("alright testing" arrived as
+    /// "testing").
+    ///
+    /// Only ever called once the microphone is already authorised: an engine
+    /// created before the grant keeps an input node that produces silence for
+    /// the lifetime of the process.
+    func prewarm() {
+        guard !isRunning, engine == nil else { return }
+        guard AVCaptureDevice.authorizationStatus(for: .audio) == .authorized else { return }
+        do {
+            try build()
+            isPrewarmed = true
+        } catch {
+            teardown()
+            isPrewarmed = false
+        }
+    }
+
+    /// Drop a prewarmed (not yet started) engine — used when the audio route
+    /// changes underneath us, so the next recording rebuilds on the new device.
+    func invalidatePrewarm() {
+        // Keyed on the engine, not `isPrewarmed`: a start() that failed and
+        // rebuilt leaves an engine behind with the flag cleared, and gating on
+        // the flag made that engine impossible to ever replace — it stayed bound
+        // to the old input device until the app restarted.
+        guard !isRunning, engine != nil else { return }
+        teardown()
+    }
+
     func start() throws {
         guard !isRunning else { return }
 
         framesCaptured = 0
         peakLevel = 0
 
+        if engine == nil {
+            try build()
+            isPrewarmed = false
+        }
+        guard let engine else {
+            throw NSError(domain: "Quill", code: 1, userInfo: [
+                NSLocalizedDescriptionKey: "No microphone input device available — check Sound ▸ Input."
+            ])
+        }
+
+        do {
+            try engine.start()
+        } catch {
+            // A prewarmed engine can go stale (device unplugged, sleep). Rebuild
+            // once rather than failing the dictation the user just started.
+            teardown()
+            try build()
+            isPrewarmed = false
+            guard let fresh = self.engine else { throw error }
+            try fresh.start()
+        }
+        startedFromPrewarm = isPrewarmed
+        isPrewarmed = false
+        isRunning = true
+    }
+
+    func stop() {
+        guard isRunning else { return }
+        teardown()
+        isRunning = false
+        onLevel(0)
+    }
+
+    private func build() throws {
         let engine = AVAudioEngine()
         self.engine = engine
 
@@ -74,18 +148,15 @@ final class Recorder {
         }
 
         engine.prepare()
-        try engine.start()
-        isRunning = true
     }
 
-    func stop() {
-        guard isRunning, let engine else { return }
+    private func teardown() {
+        isPrewarmed = false
+        guard let engine else { return }
         engine.inputNode.removeTap(onBus: 0)
-        engine.stop()
+        if engine.isRunning { engine.stop() }
         self.engine = nil
         converter = nil
-        isRunning = false
-        onLevel(0)
     }
 
     private func process(_ buffer: AVAudioPCMBuffer) {

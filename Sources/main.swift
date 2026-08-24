@@ -42,6 +42,8 @@ enum Defaults {
     static let keepHistory = "keepHistory"
     /// Draw a circle on screen while dictating to capture that region (BetterVoice-style).
     static let circleCapture = "circleCapture"
+    /// Send personal-dictionary terms to the recogniser as `keyterm` biases.
+    static let sttKeyterms = "sttKeyterms"
 
     static func register() {
         UserDefaults.standard.register(defaults: [
@@ -67,6 +69,7 @@ enum Defaults {
             vocabLearnFromEdits: true,
             keepHistory: true,
             circleCapture: false,
+            sttKeyterms: true,
         ])
     }
 
@@ -254,6 +257,17 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         // Re-assert at launch: the setting can be reset by OS updates, and older
         // builds never wrote it when 🌐 was only the smart key.
         neutralizeGlobeActionIfUsed()
+        // Build the audio engine before the first keypress: doing it inside
+        // start() cost 90–250ms, and the opening word was simply never recorded.
+        recorder.prewarm()
+        // A device change makes a prepared engine point at the wrong input.
+        NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange, object: nil, queue: .main
+        ) { [weak self] _ in
+            guard let self, !self.isRecording else { return }
+            self.recorder.invalidatePrewarm()
+            self.recorder.prewarm()
+        }
         // Hold mode only fires onHold*; onTrigger is for tap modes / pill / menu.
         hotkey.onTrigger = { [weak self] lane in
             guard let self else { return }
@@ -555,6 +569,15 @@ final class QuillApp: NSObject, NSApplicationDelegate {
             + "field, that correction is added to the personal dictionary."
         vocabMenu.addItem(editItem)
 
+        let keytermItem = NSMenuItem(title: "Use my terms while transcribing (smart key)",
+                                     action: #selector(toggleSTTKeyterms), keyEquivalent: "")
+        keytermItem.target = self
+        keytermItem.state = Defaults.bool(Defaults.sttKeyterms) ? .on : .off
+        keytermItem.toolTip = "On the smart (cleanup) key only, sends your pinned and "
+            + "mishear-prone terms to speech-to-text as recognition hints. The raw key stays "
+            + "untouched so it always gives you exactly what you said."
+        vocabMenu.addItem(keytermItem)
+
         let seedItem = NSMenuItem(title: "Install standard AI / harness vocabulary",
                                   action: #selector(installStandardVocab), keyEquivalent: "")
         seedItem.target = self
@@ -854,6 +877,17 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         hud.apply(.notice(on
             ? "Will learn dictionary terms from your post-paste edits"
             : "Won't watch fields for edits"))
+        hud.collapse(after: 2.6)
+    }
+
+    @objc private func toggleSTTKeyterms() {
+        Defaults.flip(Defaults.sttKeyterms)
+        let on = Defaults.bool(Defaults.sttKeyterms)
+        let n = on ? Vocabulary.keyterms().count : 0
+        Log.write("stt keyterms = \(on) (\(n) eligible, smart key only)")
+        hud.apply(.notice(on
+            ? "Smart key transcribes with \(n) of your terms as hints"
+            : "Transcribing without your term hints"))
         hud.collapse(after: 2.6)
     }
 
@@ -1196,10 +1230,18 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         client.onComplete = { [weak self] text in
             self?.finishSession(with: text, generation: sessionGeneration)
         }
-        client.onFailure = { [weak self] failure in self?.abortSession(message: failure.message) }
+        client.onFailure = { [weak self] failure in
+            guard let self, sessionGeneration == self.polishGeneration else { return }
+            self.abortSession(message: failure.message)
+        }
 
+        // Term hints are part of the cleanup path only. On the raw key the user
+        // wants exactly what was said, with nothing biasing the recogniser —
+        // hinting there pulled ordinary words onto dictionary terms.
+        let useKeyterms = sessionUsesCleanup && Defaults.bool(Defaults.sttKeyterms)
         client.connect(token: creds.token,
-                       language: UserDefaults.standard.string(forKey: Defaults.language) ?? "en")
+                       language: UserDefaults.standard.string(forKey: Defaults.language) ?? "en",
+                       keyterms: useKeyterms ? Vocabulary.keyterms() : [])
 
         if sessionUsesCleanup {
             // Pay for the cleanup TLS handshake now, while the user is still
@@ -1207,10 +1249,18 @@ final class QuillApp: NSObject, NSApplicationDelegate {
             Cleaner.warm(token: creds.token)
         }
 
+        // Hops to main because this fires on the audio render thread, where
+        // `socketReady` and `pendingPCM` would otherwise be read and mutated
+        // concurrently with the main-queue flush in `onReady` — an unsynchronised
+        // Array mutation, and exactly at socket-open time. The main queue is
+        // serial and FIFO, so chunk order is preserved; it also keeps the
+        // websocket send off the render thread.
         recorder.onPCM = { [weak self] data in
-            guard let self else { return }
-            if self.socketReady { client.send(pcm: data) }
-            else if self.pendingPCM.count < 200 { self.pendingPCM.append(data) }
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if self.socketReady { client.send(pcm: data) }
+                else if self.pendingPCM.count < 200 { self.pendingPCM.append(data) }
+            }
         }
         recorder.onLevel = { [weak self] level in
             DispatchQueue.main.async {
@@ -1345,7 +1395,7 @@ final class QuillApp: NSObject, NSApplicationDelegate {
     }
 
     private func logAudioState() {
-        Log.write("  audio: input=\(recorder.inputDescription) "
+        Log.write("  audio: prewarmed=\(recorder.startedFromPrewarm) input=\(recorder.inputDescription) "
             + "frames=\(recorder.framesCaptured) peak=\(String(format: "%.4f", recorder.peakLevel)) "
             + "socketReady=\(socketReady) sawText=\(sawAnyText)")
     }
@@ -1406,7 +1456,9 @@ final class QuillApp: NSObject, NSApplicationDelegate {
 
     /// Chord, short hold, release-before-commit, or Escape — throw it away, insert nothing.
     private func cancelSession(announce: Bool = false) {
-        invalidatePendingPolish()
+        // Deliberately NOT invalidating the polish generation before the
+        // not-recording bail below: that bumps the generation on a no-op cancel,
+        // which would make a legitimate in-flight transcript look superseded.
         speculative = nil
         specSnapshot = nil
         // Pending arm (mic auth not finished yet): clear flags so the auth
@@ -1422,6 +1474,7 @@ final class QuillApp: NSObject, NSApplicationDelegate {
             return
         }
         Log.write(announce ? "cancelled by Escape" : "cancelled (discard session)")
+        invalidatePendingPolish()
         isRecording = false
         sessionFromHold = false
         sessionUsesCleanup = false
@@ -1436,6 +1489,7 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         hotkey.resetHoldState()
         invalidateTimers()
         recorder.stop()
+        recorder.prewarm()
         circleCapture.discard()
         stt?.cancel()
         stt = nil
@@ -1501,6 +1555,8 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         }
         invalidateTimers()
         recorder.stop()
+        // Have the engine ready again before the next keypress.
+        recorder.prewarm()
         circleCapture.stopTracking()
         refreshIcon()
 
@@ -1559,6 +1615,14 @@ final class QuillApp: NSObject, NSApplicationDelegate {
     }
 
     private func finishSession(with text: String, generation: Int) {
+        // The socket waits up to 6s for its tail, so a transcript can land after
+        // the user has already started dictating again. Without this guard the
+        // late arrival cleared `stt` — orphaning the LIVE session's client so it
+        // never finished — and pasted the old words into whatever was focused.
+        guard generation == polishGeneration else {
+            Log.write("finish ignored — session superseded by a newer dictation")
+            return
+        }
         stt = nil
         let enteredAt = Date()
         finishEnteredAt = enteredAt
@@ -1861,10 +1925,12 @@ final class QuillApp: NSObject, NSApplicationDelegate {
             deliveringCircleImages: false
         )
 
+        // See deliverRichPaste: claim the selection before the delay, or a
+        // dictation started inside the settle window loses its own selection.
+        let selection = capturedSelection
+        capturedSelection = nil
         DispatchQueue.main.asyncAfter(deadline: .now() + settle) { [weak self] in
             guard let self else { return }
-            let selection = self.capturedSelection
-            self.capturedSelection = nil
             Inserter.insert(text,
                             atEndOfField: Defaults.bool(Defaults.insertAtEnd),
                             replacing: selection) { outcome in
@@ -1914,13 +1980,20 @@ final class QuillApp: NSObject, NSApplicationDelegate {
             deliveringCircleImages: true
         )
 
+        // Claimed now rather than inside the delay: a dictation started during
+        // the settle window overwrites `capturedSelection`, and this delivery
+        // would then replace the NEW session's highlighted text.
+        let selection = capturedSelection
+        capturedSelection = nil
         DispatchQueue.main.asyncAfter(deadline: .now() + settle) { [weak self] in
             guard let self else { return }
-            let selection = self.capturedSelection
-            self.capturedSelection = nil
             Inserter.insert(text,
                             atEndOfField: Defaults.bool(Defaults.insertAtEnd),
-                            replacing: selection) { outcome in
+                            replacing: selection,
+                            // Don't restore the prior pasteboard — it often still
+                            // holds the previous circle PNG, which then looks like
+                            // "old capture" when the user ⌘V's to attach.
+                            restoreClipboardAfterPaste: false) { outcome in
                 switch outcome.method {
                 case .accessibility, .clipboard:
                     if let started = self.finaliseStartedAt {
@@ -1932,18 +2005,35 @@ final class QuillApp: NSObject, NSApplicationDelegate {
                     self.logLatencySummary()
                     self.hud.apply(.delivered(outcome.app))
                     self.hud.update(text: text)
+                    // Text is in the field. Put the newest capture on the pasteboard
+                    // and ⌘V it so attachment-aware apps (Grok, ChatGPT, …) actually
+                    // attach the image — clipboard-only left users with speech and
+                    // no visible attachment.
                     let imageDelay = CircleDelivery.imageClipboardDelay(
                         textInsertedViaClipboard: outcome.method == .clipboard
                     )
                     DispatchQueue.main.asyncAfter(deadline: .now() + imageDelay) {
-                        if CircleCaptureSession.copyImagesToClipboard(imageURLs: circleImages) {
-                            let n = circleImages.count
-                            self.hud.flashTarget(
-                                "\(n) capture\(n == 1 ? "" : "s") on clipboard — ⌘V to attach",
-                                for: 3)
-                            Log.write("circle capture: \(n) image(s) on clipboard after text insert")
+                        let latest = Array(circleImages.suffix(1))
+                        guard CircleCaptureSession.copyImagesToClipboard(imageURLs: latest) else {
+                            Log.write("circle capture: failed to put image(s) on clipboard")
+                            self.circleCapture.discard()
+                            return
                         }
-                        self.circleCapture.discard()
+                        let total = circleImages.count
+                        Inserter.pastePreparedClipboard(restoreAfter: 0) { pasteOutcome in
+                            switch pasteOutcome.method {
+                            case .accessibility, .clipboard:
+                                let label = total > 1
+                                    ? "attached latest of \(total) captures"
+                                    : "capture attached"
+                                self.hud.flashTarget(label, for: 2.5)
+                                Log.write("circle capture: \(total) taken, auto-pasted latest image into \(pasteOutcome.app ?? "?")")
+                            case .blocked:
+                                self.hud.flashTarget("capture on clipboard — ⌘V to attach", for: 3)
+                                Log.write("circle capture: auto-paste blocked — image left on clipboard")
+                            }
+                            self.circleCapture.discard()
+                        }
                     }
                     self.hud.collapse(after: 0.7)
                     self.armEditWatch(afterInserting: text)
@@ -1999,6 +2089,7 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         hotkey.resetHoldState()
         invalidateTimers()
         recorder.stop()
+        recorder.prewarm()
         circleCapture.discard()
         stt?.cancel()
         stt = nil
@@ -2086,6 +2177,12 @@ final class PostInsertEditWatch {
     /// tree yet — nudge it awake once and retry before giving up.
     private func snapshotAndArm(retryAfterAXNudge: Bool) {
         guard !original.isEmpty else { return }
+        // Two arming closures can be in flight at once (eager insert arms for
+        // the raw text, the polish swap arms again). Without this the earlier
+        // repeating timer was overwritten but never invalidated, and went on
+        // polling Accessibility once a second for the life of the process.
+        timer?.invalidate()
+        timer = nil
         guard let snapshot = Inserter.focusedFieldValue(), !snapshot.isEmpty else {
             if retryAfterAXNudge, Inserter.encourageAXExposure() {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { [weak self] in

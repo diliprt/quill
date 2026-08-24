@@ -37,8 +37,8 @@ expect(CircleDelivery.settleSeconds(stop: .other, circleCaptureEnabled: false, d
 
 // MARK: - Image clipboard delay after text insert
 
-expect(CircleDelivery.imageClipboardDelay(textInsertedViaClipboard: true) == 0.55,
-       "after ⌘V text insert wait past pasteboard restore")
+expect(CircleDelivery.imageClipboardDelay(textInsertedViaClipboard: true) == 0.20,
+       "after ⌘V text insert short settle (no image restore race)")
 expect(CircleDelivery.imageClipboardDelay(textInsertedViaClipboard: false) == 0.08,
        "after AX text insert short delay before images")
 

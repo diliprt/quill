@@ -5,7 +5,7 @@
 > **This repository** ([diliprt/quill](https://github.com/diliprt/quill)) is a public fork of
 > [xfreeze2/quill](https://github.com/xfreeze2/quill). Upstream behaviour is preserved; this
 > fork adds hold-to-talk, dual-key Grok cleanup, and a local personal dictionary.
-> Current fork build: **0.8.6**.
+> Current fork build: **0.8.7**.
 
 Tap a key, talk, then click into whatever window you want the words in. They appear there — at
 the end of what's already written, without touching your clipboard.
@@ -112,7 +112,7 @@ The setup window (**Quill ▸ Setup…**) lists this as an optional row with an 
 | | Off (default) | On (no circle drawn) | On + circle drawn |
 |--|---------------|----------------------|-------------------|
 | Gesture | Dictate only | Dictate only | **Draw a closed circle** with the mouse around on-screen content |
-| Capture | — | — | Full display PNG with blue highlight ring |
+| Capture | — | — | PNG cropped to the circled area, with blue highlight ring |
 | Delivery | Normal insert on release | Insert into app frontmost when you **release** the key (Alt+Tab while holding first) | **Speech inserts first**; screenshots stay on clipboard for optional ⌘V attach (combined paste would drop text) |
 | Permission | — | Screen Recording for captures | Screen Recording required |
 

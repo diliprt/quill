@@ -94,11 +94,13 @@ final class CircleCaptureSession {
         resetDetector()
     }
 
-    /// After text lands in the field, put transcript + PNGs on the clipboard for attachment-aware apps.
-    static func copyToClipboard(transcript: String, imageURLs: [URL]) -> Bool {
+    /// Put screenshots on the clipboard (no transcript). Used after speech is already inserted,
+    /// so a follow-up ⌘V attaches the image without replacing the text.
+    static func copyImagesToClipboard(imageURLs: [URL]) -> Bool {
+        guard case .imagesOnly = CircleDelivery.postInsertClipboardLayout(imageCount: imageURLs.count)
+        else { return false }
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
-
         var items: [NSPasteboardItem] = []
         for url in imageURLs {
             guard let data = try? Data(contentsOf: url) else { continue }
@@ -106,21 +108,51 @@ final class CircleCaptureSession {
             guard item.setData(data, forType: .png) else { continue }
             items.append(item)
         }
+        guard !items.isEmpty else { return false }
+        return pasteboard.writeObjects(items)
+    }
 
+    /// Pack transcript + PNGs when both must share the pasteboard (blocked fallback).
+    static func copyToClipboard(transcript: String, imageURLs: [URL]) -> Bool {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        let layout = CircleDelivery.combinedClipboardLayout(
+            transcript: transcript,
+            imageCount: imageURLs.count
+        )
         let trimmed = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !trimmed.isEmpty {
+
+        switch layout {
+        case .empty:
+            return false
+        case .textOnly:
+            return copyTextOnly(trimmed)
+        case .imagesOnly:
+            return copyImagesToClipboard(imageURLs: imageURLs)
+        case .singleItemTextAndPng:
+            guard let data = try? Data(contentsOf: imageURLs[0]) else {
+                return copyTextOnly(trimmed)
+            }
+            let item = NSPasteboardItem()
+            guard item.setString(trimmed, forType: .string),
+                  item.setData(data, forType: .png)
+            else { return copyTextOnly(trimmed) }
+            return pasteboard.writeObjects([item])
+        case .textItemThenImageItems:
+            var items: [NSPasteboardItem] = []
             let textItem = NSPasteboardItem()
             guard textItem.setString(trimmed, forType: .string) else {
                 return copyTextOnly(trimmed)
             }
-            if items.isEmpty {
-                return pasteboard.writeObjects([textItem])
+            items.append(textItem)
+            for url in imageURLs {
+                guard let data = try? Data(contentsOf: url) else { continue }
+                let item = NSPasteboardItem()
+                guard item.setData(data, forType: .png) else { continue }
+                items.append(item)
             }
-            items.insert(textItem, at: 0)
+            return pasteboard.writeObjects(items)
         }
-
-        guard !items.isEmpty else { return false }
-        return pasteboard.writeObjects(items)
     }
 
     private static func copyTextOnly(_ transcript: String) -> Bool {

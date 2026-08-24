@@ -40,4 +40,20 @@ cp vocab_test_main.swift build/vocab/main.swift
   -o build/vocab-test
 ./build/vocab-test
 
+echo "→ circle delivery scenario test"
+mkdir -p build/circle
+cp ../Sources/CircleDelivery.swift build/circle/CircleDelivery.swift
+cp circle_delivery_test_main.swift build/circle/main.swift
+"$SWIFTC" -swift-version 5 build/circle/CircleDelivery.swift build/circle/main.swift \
+  -o build/circle-delivery-test
+./build/circle-delivery-test
+
+echo "→ circle gesture scenario test"
+mkdir -p build/gesture
+cp ../Sources/CircleGestureDetector.swift build/gesture/CircleGestureDetector.swift
+cp circle_gesture_test_main.swift build/gesture/main.swift
+"$SWIFTC" -swift-version 5 build/gesture/CircleGestureDetector.swift build/gesture/main.swift \
+  -o build/circle-gesture-test
+./build/circle-gesture-test
+
 echo "✓ built build/harness-before and build/harness-after"

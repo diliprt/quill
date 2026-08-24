@@ -5,7 +5,7 @@
 > **This repository** ([diliprt/quill](https://github.com/diliprt/quill)) is a public fork of
 > [xfreeze2/quill](https://github.com/xfreeze2/quill). Upstream behaviour is preserved; this
 > fork adds hold-to-talk, dual-key Grok cleanup, and a local personal dictionary.
-> Current fork build: **0.8.1**.
+> Current fork build: **0.8.7**.
 
 Tap a key, talk, then click into whatever window you want the words in. They appear there — at
 the end of what's already written, without touching your clipboard.
@@ -27,6 +27,7 @@ Additions on top of upstream (menu-bar right-click → settings):
 | **Clean up with Grok** | Toggle + smart-key picker. See [Cleanup model & latency notes](#cleanup-model--latency-notes) below. **Length-scaled timeout → paste raw** (P1). |
 | **Nearby text for cleanup (P4)** | Opt-in under **Clean up with Grok**. Smart path may use focused field / window title / selection (not passwords) for name spellings only. Default **off** for A/B. |
 | **Personal dictionary** | Local-only unique terms + AI/harness seed; learns from dictation, cleanup pairs, and post-paste edits. File: `~/Library/Application Support/com.freeze.quill/vocabulary.json`. Soft LLM guidance only (hard local alias replace = P2, not shipped). |
+| **Circle screen capture** | Opt-in under **Appearance ▸ Circle to capture screen context**. Circle on-screen content while dictating; **Alt+Tab to your target app, release the dictation key** — Quill pastes speech (+ screenshot if you circled). Needs **Screen Recording** in Setup. Default **off**. |
 
 ### Typical layout (example)
 
@@ -95,6 +96,29 @@ Menu: **Quill ▸ Clean up with Grok ▸ Use nearby text for cleanup** (requires
 4. Compare `Nms` and whether spellings match the field.
 
 **Current caps:** field snippet **800** chars (near caret), selection **400**, title **120**. Mechanism is **Accessibility only** (no screenshot/OCR). One laptop screen of prose is often ~**2–4k** visible chars — so 800 is local neighborhood, not full page.
+
+### Circle screen capture (v0.8.2+)
+
+Menu: **Quill ▸ Appearance ▸ Circle to capture screen context** (default **off**).
+
+**Permission — Screen Recording, not Accessibility**
+
+Circle capture does **not** appear in Accessibility settings. It needs **Screen Recording**:
+
+**System Settings ▸ Privacy & Security ▸ Screen Recording** → enable **Quill**.
+
+The setup window (**Quill ▸ Setup…**) lists this as an optional row with an **Open Settings** button. Quill also appears in the Screen Recording list after you enable circle capture or try to circle once.
+
+| | Off (default) | On (no circle drawn) | On + circle drawn |
+|--|---------------|----------------------|-------------------|
+| Gesture | Dictate only | Dictate only | **Draw a closed circle** with the mouse around on-screen content |
+| Capture | — | — | PNG cropped to the circled area, with blue highlight ring |
+| Delivery | Normal insert on release | Insert into app frontmost when you **release** the key (Alt+Tab while holding first) | **Speech inserts first**; screenshots stay on clipboard for optional ⌘V attach (combined paste would drop text) |
+| Permission | — | Screen Recording for captures | Screen Recording required |
+
+**Workflow:** hold dictation key → speak (optionally circle) → **Alt+Tab** to where you want it → **release** the key. Quill inserts the transcript into the focused field. If you circled, the screenshot stays on the clipboard — **⌘V once more** only if you want to attach the image (many paste boxes ignore text when an image is in the same paste).
+
+Adapted from [BetterVoice](https://github.com/TarunTomar122/better-voice) (MIT). No OCR or vision model — images are reference screenshots only.
 
 ### Future upgrades (parked — revisit if needed)
 

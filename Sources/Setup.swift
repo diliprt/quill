@@ -28,12 +28,17 @@ final class SetupWindow: NSObject, NSWindowDelegate {
         case microphone
         case accessibility
         case grokSession
+        case screenRecording
+
+        /// Circle capture is optional — the three core rows are still required.
+        static let required: [Requirement] = [.microphone, .accessibility, .grokSession]
 
         var title: String {
             switch self {
-            case .microphone:    return "Microphone"
-            case .accessibility: return "Accessibility"
-            case .grokSession:   return "Grok Build sign-in"
+            case .microphone:       return "Microphone"
+            case .accessibility:    return "Accessibility"
+            case .grokSession:      return "Grok Build sign-in"
+            case .screenRecording:  return "Screen Recording"
             }
         }
 
@@ -45,14 +50,17 @@ final class SetupWindow: NSObject, NSWindowDelegate {
                 return "So the trigger key works, and so Quill can type into other apps."
             case .grokSession:
                 return "Quill transcribes using your Grok subscription. Sign in to the grok command-line tool once."
+            case .screenRecording:
+                return "For circle capture only — not Accessibility. Lets Quill screenshot areas you circle while dictating."
             }
         }
 
         var actionTitle: String? {
             switch self {
-            case .microphone:    return "Allow"
-            case .accessibility: return "Open Settings"
-            case .grokSession:   return nil
+            case .microphone:       return "Allow"
+            case .accessibility:    return "Open Settings"
+            case .grokSession:      return nil
+            case .screenRecording:  return "Open Settings"
             }
         }
 
@@ -64,6 +72,8 @@ final class SetupWindow: NSObject, NSWindowDelegate {
                 return AXIsProcessTrusted()
             case .grokSession:
                 return Auth.load() != nil
+            case .screenRecording:
+                return Inserter.hasScreenCaptureAccess
             }
         }
 
@@ -73,10 +83,14 @@ final class SetupWindow: NSObject, NSWindowDelegate {
             case .grokSession:
                 guard let email = Auth.load()?.email else { return nil }
                 return email
+            case .screenRecording:
+                return "Granted — circle capture can screenshot."
             default:
                 return nil
             }
         }
+
+        var isRequired: Bool { Requirement.required.contains(self) }
     }
 
     // MARK: Presentation
@@ -90,7 +104,7 @@ final class SetupWindow: NSObject, NSWindowDelegate {
         }
 
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 480, height: 430),
+            contentRect: NSRect(x: 0, y: 0, width: 480, height: 500),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false)
@@ -117,7 +131,7 @@ final class SetupWindow: NSObject, NSWindowDelegate {
     }
 
     private func buildContent() -> NSView {
-        let root = NSView(frame: NSRect(x: 0, y: 0, width: 480, height: 430))
+        let root = NSView(frame: NSRect(x: 0, y: 0, width: 480, height: 500))
 
         let title = NSTextField(labelWithString: "Quill")
         title.font = .systemFont(ofSize: 24, weight: .semibold)
@@ -188,6 +202,11 @@ final class SetupWindow: NSObject, NSWindowDelegate {
             Inserter.openPrivacyPane("Privacy_Accessibility")
         case .grokSession:
             break
+        case .screenRecording:
+            if !Inserter.hasScreenCaptureAccess {
+                Inserter.requestScreenCaptureAccess()
+            }
+            Inserter.openPrivacyPane("Privacy_ScreenCapture")
         }
     }
 
@@ -207,7 +226,7 @@ final class SetupWindow: NSObject, NSWindowDelegate {
         for row in rows {
             let satisfied = row.requirement.isSatisfied
             row.apply(satisfied: satisfied, note: satisfied ? row.requirement.satisfiedNote : nil)
-            if !satisfied { allGood = false }
+            if row.requirement.isRequired && !satisfied { allGood = false }
         }
 
         let gesture = Defaults.currentTrigger.gesture(mode: Defaults.currentGesture)
@@ -216,6 +235,9 @@ final class SetupWindow: NSObject, NSWindowDelegate {
                 footer.stringValue = "You're set. \(gesture) to talk; release to insert the words."
             } else {
                 footer.stringValue = "You're set. \(gesture) to start talking, then click where you want the words."
+            }
+            if Defaults.circleCaptureIsOn && !Inserter.hasScreenCaptureAccess {
+                footer.stringValue += " Enable Screen Recording above for circle capture."
             }
             footer.textColor = .secondaryLabelColor
             onReady()
@@ -302,7 +324,13 @@ final class SetupWindow: NSObject, NSWindowDelegate {
         func apply(satisfied: Bool, note: String?) {
             mark.stringValue = satisfied ? "✓" : "○"
             mark.textColor = satisfied ? .systemGreen : .tertiaryLabelColor
+            let optional = !requirement.isRequired
             button.isHidden = satisfied || requirement.actionTitle == nil
+            if optional && !satisfied {
+                title.stringValue = requirement.title + " (optional)"
+            } else {
+                title.stringValue = requirement.title
+            }
             if satisfied, let note {
                 detail.stringValue = note
             } else if satisfied {

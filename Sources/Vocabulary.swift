@@ -340,6 +340,79 @@ enum Vocabulary {
         return lines.joined(separator: "\n")
     }
 
+    /// Terms worth sending to the recogniser as `keyterm` biases.
+    ///
+    /// This is a much stricter list than `promptBlock`: a keyterm nudges the
+    /// acoustic model toward a spelling, so junk biases actively hurt. The
+    /// dictionary auto-learns from inserted text and picks up noise along the
+    /// way (durations like "17s", ordinary Title-case words like "Bottom"),
+    /// which must never reach the wire.
+    ///
+    /// Kept: pinned terms, anything STT has already misheard (has aliases),
+    /// acronyms / CamelCase / dotted identifiers, and multi-word phrases.
+    static func keyterms(limit: Int = 50) -> [String] {
+        var seen = Set<String>()
+        var picked: [String] = []
+        for entry in all() {
+            let term = entry.term.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard term.count >= 3, term.count <= 50 else { continue }
+            guard isKeytermWorthy(entry) else { continue }
+            let key = term.lowercased()
+            guard !seen.contains(key) else { continue }
+            seen.insert(key)
+            picked.append(term)
+            if picked.count >= limit { break }
+        }
+        return picked
+    }
+
+    /// Ordinary words the dictionary has picked up that must never bias the
+    /// recogniser: hinting "Searched" makes it prefer that over "search".
+    private static let keytermStoplist: Set<String> = [
+        "product", "context", "search", "searched", "shift", "control",
+        "personal", "studio", "projects", "cleaner", "bottom", "optional",
+        "responding", "thinking", "greeting", "waiting", "review", "copy",
+    ]
+
+    /// Everyday verbs that start UI-label phrases ("Run Check", "Get Auth").
+    /// Those are captions the user dictated, not names — and biasing toward
+    /// them pulls ordinary speech onto the verb ("say" heard as "check").
+    private static let keytermJunkLeaders: Set<String> = [
+        "run", "get", "set", "add", "open", "close", "make", "use", "keep",
+        "copy", "check", "review", "show", "tell", "ask", "abort", "start",
+        "stop", "pull", "push", "install", "remove", "enable", "disable",
+    ]
+
+    private static func isKeytermWorthy(_ entry: Entry) -> Bool {
+        let term = entry.term
+        // Durations and bare quantities ("1s", "17s", "500K") come from log
+        // chatter, not speech the user wants spelled a certain way.
+        if let first = term.first, first.isNumber { return false }
+        if keytermStoplist.contains(term.lowercased()) { return false }
+        if term.contains(" ") {
+            let words = term.split(separator: " ").map { $0.lowercased() }
+            guard let lead = words.first else { return false }
+            // "Run Check" / "Run Get Auth" — a label, not a name.
+            if keytermJunkLeaders.contains(lead) { return false }
+            // Every word ordinary means the phrase carries no spelling value.
+            if words.allSatisfy({ isCommonWord($0) || keytermStoplist.contains($0) }) {
+                return false
+            }
+            return true
+        }
+        if entry.pinned { return true }
+        // A recorded alias means the recogniser has actually got this wrong.
+        if !entry.aliases.isEmpty { return true }
+        // Acronyms and CamelCase (STT, API, GitHub, vLLM) plus dotted or
+        // hyphenated identifiers (Node.js, grok-4) are worth biasing.
+        let body = term.dropFirst()
+        if body.contains(where: { $0.isUppercase }) { return true }
+        if term.contains(".") || term.contains("-") { return true }
+        if term.allSatisfy({ $0.isUppercase || $0.isNumber }) { return true }
+        if term.contains(where: { $0.isNumber }) { return true }
+        return false
+    }
+
     /// Learn unique terms from text that was actually inserted.
     static func learnFromFinalText(_ text: String) {
         guard learningEnabled else { return }
@@ -565,12 +638,39 @@ enum Vocabulary {
 
     // MARK: - Upsert
 
+    /// Bare quantities and durations ("1s", "640ms", "500K"). These arrive from
+    /// dictated log chatter, never help a spelling, and crowd out real terms.
+    private static func isQuantityToken(_ term: String) -> Bool {
+        let t = term.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let first = t.first, first.isNumber else { return false }
+        return t.range(of: #"^\d+(\.\d+)?[A-Za-z]{0,2}$"#, options: .regularExpression) != nil
+    }
+
+    /// An alias only earns its place if it is a plausible mishearing of the
+    /// term. Edit-learning used to record whatever word happened to change,
+    /// which taught "GitHub" was often heard as "written" — and then cleanup
+    /// started rewriting an ordinary word into a product name.
+    private static func isUsableAlias(_ alias: String, for term: String) -> Bool {
+        let a = alias.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard a.count >= 3 else { return false }
+        guard a.caseInsensitiveCompare(term) != .orderedSame else { return false }
+        guard !isCommonWord(a), !isQuantityToken(a) else { return false }
+        // Case-only variants ("gitlab" for "GitLab") are always fine; anything
+        // else has to actually sound like the term.
+        if a.caseInsensitiveCompare(term) == .orderedSame { return true }
+        let squashedAlias = a.lowercased().filter { $0.isLetter || $0.isNumber }
+        let squashedTerm = term.lowercased().filter { $0.isLetter || $0.isNumber }
+        if squashedAlias == squashedTerm { return true }
+        return looksLikeMishearing(heard: a, preferred: term)
+    }
+
     /// Returns true if something changed.
     @discardableResult
     private static func upsert(_ term: String, alias: String?, pinned: Bool,
                                into entries: inout [Entry]) -> Bool {
         let t = term.trimmingCharacters(in: .whitespacesAndNewlines)
         guard t.count >= 2, !isCommonWord(t) else { return false }
+        guard pinned || !isQuantityToken(t) else { return false }
 
         let now = Date().timeIntervalSince1970
         if let i = entries.firstIndex(where: { $0.term.caseInsensitiveCompare(t) == .orderedSame }) {
@@ -584,8 +684,7 @@ enum Vocabulary {
             if pinned { e.pinned = true }
             if let alias {
                 let a = alias.trimmingCharacters(in: .whitespacesAndNewlines)
-                if !a.isEmpty,
-                   a.caseInsensitiveCompare(e.term) != .orderedSame,
+                if isUsableAlias(a, for: e.term),
                    !e.aliases.contains(where: { $0.caseInsensitiveCompare(a) == .orderedSame }) {
                     e.aliases.insert(a, at: 0)
                     if e.aliases.count > maxAliasesPerTerm {
@@ -601,7 +700,7 @@ enum Vocabulary {
         var aliases: [String] = []
         if let alias {
             let a = alias.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !a.isEmpty, a.caseInsensitiveCompare(t) != .orderedSame {
+            if isUsableAlias(a, for: t) {
                 aliases = [a]
             }
         }

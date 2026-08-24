@@ -49,9 +49,10 @@ enum CircleDelivery {
     }
 
     /// Delay after text insert before replacing the pasteboard with images.
-    /// Clipboard-fallback text paste restores the prior pasteboard at ~0.45s.
+    /// Clipboard-fallback text paste no longer restores prior images, so a short
+    /// settle is enough for ⌘V to finish before we write the PNG.
     static func imageClipboardDelay(textInsertedViaClipboard: Bool) -> TimeInterval {
-        textInsertedViaClipboard ? 0.55 : 0.08
+        textInsertedViaClipboard ? 0.20 : 0.08
     }
 
     /// How to pack speech + captures when both must share the pasteboard

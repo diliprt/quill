@@ -192,6 +192,7 @@ enum Inserter {
     static func insert(_ text: String,
                        atEndOfField: Bool,
                        replacing selection: Selection? = nil,
+                       restoreClipboardAfterPaste: Bool = true,
                        completion: @escaping (Outcome) -> Void) {
         let app = frontmostAppName()
         Log.write("insert → \(app ?? "?") · \(describeFocus()) · trusted=\(isTrusted)")
@@ -211,7 +212,7 @@ enum Inserter {
                 return
             }
             // The selection is restored, so a paste will overwrite it too.
-            insertViaClipboard(payload) {
+            insertViaClipboard(payload, restoreAfter: restoreClipboardAfterPaste ? 0.45 : 0) {
                 Log.write("  → replaced selection via paste")
                 completion(Outcome(method: isTrusted ? .clipboard : .blocked, app: app))
             }
@@ -251,7 +252,7 @@ enum Inserter {
             return
         }
 
-        insertViaClipboard(payload) {
+        insertViaClipboard(payload, restoreAfter: restoreClipboardAfterPaste ? 0.45 : 0) {
             let trusted = isTrusted
             Log.write("  → clipboard fallback (⌘V posted), trusted=\(trusted)")
             completion(Outcome(method: trusted ? .clipboard : .blocked, app: app))
@@ -501,18 +502,22 @@ enum Inserter {
             return ctx
         }
 
-        ctx.windowTitle = truncate(frontmostWindowTitle(), maxChars: contextTitleCap)
-
         guard let element = focusedElement() else {
             Log.write("cleanup context: \(ctx.logSummary) (no focused element)")
             return ctx
         }
 
+        // Read the title only after the secure check. A password field's window
+        // title is itself sensitive ("1Password — chase.com"), and sending it
+        // from the branch that decided the field was too private to read
+        // defeated the point.
         if isSecureTextElement(element) {
             ctx.skippedSecureField = true
             Log.write("cleanup context: \(ctx.logSummary) — secure field skipped")
             return ctx
         }
+
+        ctx.windowTitle = truncate(frontmostWindowTitle(), maxChars: contextTitleCap)
 
         // Selection: prefer live selection, else what was captured at arm time.
         if let live = selectedText(from: element), !live.isEmpty {
@@ -661,25 +666,32 @@ enum Inserter {
                                             payload as CFTypeRef) == .success
     }
 
-    private static func insertViaClipboard(_ text: String, completion: @escaping () -> Void) {
+    private static func insertViaClipboard(_ text: String,
+                                           restoreAfter: TimeInterval = 0.45,
+                                           completion: @escaping () -> Void) {
         let pasteboard = NSPasteboard.general
-        let saved = snapshot(pasteboard)
+        // Never snapshot image types for restore: circle-capture PNGs on the
+        // pasteboard would otherwise come back after text ⌘V and look like a
+        // "stale" previous capture when the user pastes again.
+        let saved = restoreAfter > 0 ? snapshot(pasteboard, excludingImages: true) : []
 
         pasteboard.clearContents()
         pasteboard.setString(text, forType: .string)
 
-        postCommandVPaste(restoreSaved: saved, restoreAfter: 0.45, completion: completion)
+        postCommandVPaste(restoreSaved: saved, restoreAfter: restoreAfter, completion: completion)
     }
 
     /// Paste whatever is already on the general pasteboard (e.g. text + PNGs).
     /// Used when circle capture fills the pasteboard and Quill posts ⌘V for you.
-    static func pastePreparedClipboard(restoreAfter: TimeInterval = 1.0,
+    static func pastePreparedClipboard(restoreAfter: TimeInterval = 0,
                                        completion: @escaping (Outcome) -> Void) {
         let app = frontmostAppName()
-        let saved = snapshot(NSPasteboard.general)
-        Log.write("insert → \(app ?? "?") · rich paste (⌘V) · trusted=\(isTrusted)")
+        // Default restoreAfter=0: don't put a prior clipboard back over the image
+        // we just prepared — that was resurrecting stale circle captures.
+        let saved: [Item] = restoreAfter > 0 ? snapshot(NSPasteboard.general, excludingImages: true) : []
+        Log.write("insert → \(app ?? "?") · image paste (⌘V) · trusted=\(isTrusted)")
         postCommandVPaste(restoreSaved: saved, restoreAfter: restoreAfter) {
-            Log.write("  → rich paste (⌘V posted)")
+            Log.write("  → image paste (⌘V posted)")
             completion(Outcome(method: isTrusted ? .clipboard : .blocked, app: app))
         }
     }
@@ -718,19 +730,30 @@ enum Inserter {
 
     private typealias Item = [NSPasteboard.PasteboardType: Data]
 
-    private static func snapshot(_ pasteboard: NSPasteboard) -> [Item] {
+    private static let imagePasteboardTypes: Set<NSPasteboard.PasteboardType> = [
+        .png, .tiff, .pdf,
+        NSPasteboard.PasteboardType("public.jpeg"),
+        NSPasteboard.PasteboardType("public.heic"),
+    ]
+
+    private static func snapshot(_ pasteboard: NSPasteboard,
+                                 excludingImages: Bool = false) -> [Item] {
         (pasteboard.pasteboardItems ?? []).map { item in
             var stored: Item = [:]
             for type in item.types {
+                if excludingImages, imagePasteboardTypes.contains(type) { continue }
                 if let data = item.data(forType: type) { stored[type] = data }
             }
             return stored
-        }
+        }.filter { !$0.isEmpty }
     }
 
     private static func restore(_ items: [Item], to pasteboard: NSPasteboard) {
-        pasteboard.clearContents()
+        // Nothing to put back means leave the pasteboard alone. Clearing first
+        // destroyed image-only clipboards, because the snapshot deliberately
+        // skips image types and can therefore come back empty.
         guard !items.isEmpty else { return }
+        pasteboard.clearContents()
         let rebuilt = items.map { stored -> NSPasteboardItem in
             let item = NSPasteboardItem()
             for (type, data) in stored { item.setData(data, forType: type) }

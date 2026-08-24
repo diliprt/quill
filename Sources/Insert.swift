@@ -73,6 +73,13 @@ enum Inserter {
         NSWorkspace.shared.open(url)
     }
 
+    /// Circle capture uses Screen Recording — not Accessibility. Quill appears under
+    /// Privacy & Security ▸ Screen Recording after the first capture attempt or setup.
+    static var hasScreenCaptureAccess: Bool { CGPreflightScreenCaptureAccess() }
+
+    @discardableResult
+    static func requestScreenCaptureAccess() -> Bool { CGRequestScreenCaptureAccess() }
+
     static func frontmostAppName() -> String? {
         NSWorkspace.shared.frontmostApplication?.localizedName
     }

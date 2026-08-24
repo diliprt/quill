@@ -957,10 +957,17 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         Defaults.flip(Defaults.circleCapture)
         let on = Defaults.circleCaptureIsOn
         Log.write("circle capture \(on ? "enabled" : "disabled")")
-        hud.apply(.notice(on
-            ? "Circle capture on — draw a circle while dictating"
-            : "Circle capture off"))
-        hud.collapse(after: 2.5)
+        if on && !Inserter.hasScreenCaptureAccess {
+            Inserter.requestScreenCaptureAccess()
+            hud.apply(.notice("Circle capture needs Screen Recording — enable Quill in Settings"))
+            hud.collapse(after: 4)
+            Inserter.openPrivacyPane("Privacy_ScreenCapture")
+        } else {
+            hud.apply(.notice(on
+                ? "Circle capture on — draw a circle while dictating; speech lands on clipboard when you circle"
+                : "Circle capture off"))
+            hud.collapse(after: 2.5)
+        }
     }
 
     @objc private func setLanguage(_ sender: NSMenuItem) {
@@ -1259,6 +1266,9 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         Log.write("recording started — watchClicks=\(hotkey.watchClicks) fromHold=\(sessionFromHold) committed=\(holdCommitted) cleanup=\(sessionUsesCleanup)")
 
         if Defaults.circleCaptureIsOn {
+            if !Inserter.hasScreenCaptureAccess {
+                hud.flashTarget("circle capture needs Screen Recording in Setup", for: 4)
+            }
             do {
                 try circleCapture.start()
                 circleCapture.beginTracking(onGesture: { [weak self] count in
@@ -1789,6 +1799,13 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         remember(text)
         hud.update(text: text)
 
+        // Circle workflow: user circles on one app/window, then ⌘V in another.
+        // Auto-insert into whatever was frontmost would drop speech in the wrong place.
+        if !circleImages.isEmpty {
+            deliverViaClipboardOnly(text: text, circleImages: circleImages, notedCleanup: notedCleanup)
+            return
+        }
+
         if selfTestPath != nil {
             FileHandle.standardError.write(Data("SELFTEST RESULT: \(text)\n".utf8))
             // Lets a test wait for background work (e.g. launching Grok) to finish.
@@ -1865,6 +1882,32 @@ final class QuillApp: NSObject, NSApplicationDelegate {
                 }
             }
         }
+    }
+
+    /// Circle captures → clipboard only so Alt+Tab to the real target app still works.
+    private func deliverViaClipboardOnly(text: String,
+                                         circleImages: [URL],
+                                         notedCleanup: Bool) {
+        if let started = finaliseStartedAt {
+            Log.write("  tail: stop → clipboard-only in "
+                + String(format: "%.2fs", Date().timeIntervalSince(started))
+                + (notedCleanup ? " (cleaned)" : "")
+                + " · \(circleImages.count) capture(s)")
+        }
+        logLatencySummary()
+
+        if CircleCaptureSession.copyToClipboard(transcript: text, imageURLs: circleImages) {
+            Log.write("circle capture: clipboard-only — \(text.count) chars, \(circleImages.count) image(s)")
+            hud.apply(.notice("Speech + capture on clipboard"))
+            hud.flashTarget("⌘V in your target app", for: 4)
+            hud.collapse(after: 3)
+        } else {
+            Log.write("circle capture: clipboard write failed — \(text.count) chars")
+            hud.apply(.notice("Couldn't copy to clipboard — try again"))
+            hud.collapse(after: 4)
+        }
+        circleCapture.discard()
+        armEditWatch(afterInserting: text)
     }
 
     private func finishCircleCapture(text: String,

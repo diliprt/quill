@@ -1575,17 +1575,26 @@ final class QuillApp: NSObject, NSApplicationDelegate {
             return
         }
 
-        Task { @MainActor in
-            if Defaults.circleCaptureIsOn {
-                await circleCapture.waitForCaptures()
+        if Defaults.circleCaptureIsOn {
+            Task { @MainActor in
+                if circleCapture.hasPendingCaptures {
+                    await circleCapture.waitForCaptures()
+                }
+                let circleImages = circleCapture.imageURLs
+                finishSessionDeliver(trimmed: trimmed,
+                                     generation: generation,
+                                     enteredAt: enteredAt,
+                                     spec: spec,
+                                     wantsCleanup: wantsCleanup,
+                                     circleImages: circleImages)
             }
-            let circleImages = circleCapture.imageURLs
+        } else {
             finishSessionDeliver(trimmed: trimmed,
                                  generation: generation,
                                  enteredAt: enteredAt,
                                  spec: spec,
                                  wantsCleanup: wantsCleanup,
-                                 circleImages: circleImages)
+                                 circleImages: [])
         }
     }
 
@@ -1838,14 +1847,18 @@ final class QuillApp: NSObject, NSApplicationDelegate {
                             + (notedCleanup ? " (cleaned)" : ""))
                     }
                     self.logLatencySummary()
-                    self.finishCircleCapture(text: text, circleImages: circleImages)
+                    self.finishCircleCapture(text: text,
+                                             circleImages: circleImages,
+                                             insertMethod: outcome.method)
                     self.hud.apply(.delivered(outcome.app))
                     self.hud.update(text: text)
                     self.hud.collapse(after: 0.7)
                     // Watch for hand-edits in AX-readable fields → personal dictionary.
                     self.armEditWatch(afterInserting: text)
                 case .blocked:
-                    self.finishCircleCapture(text: text, circleImages: circleImages)
+                    self.finishCircleCapture(text: text,
+                                             circleImages: circleImages,
+                                             insertMethod: .blocked)
                     self.hud.apply(.notice("Grant Accessibility to Quill so it can write into apps"))
                     self.hud.collapse(after: 4)
                     Inserter.requestTrust()
@@ -1854,15 +1867,28 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         }
     }
 
-    private func finishCircleCapture(text: String, circleImages: [URL]) {
-        if !circleImages.isEmpty {
-            if CircleCaptureSession.copyToClipboard(transcript: text, imageURLs: circleImages) {
-                let n = circleImages.count
-                hud.flashTarget("\(n) capture\(n == 1 ? "" : "s") on clipboard — ⌘V to attach", for: 3)
-                Log.write("circle capture: \(n) image\(n == 1 ? "" : "s") on clipboard")
+    private func finishCircleCapture(text: String,
+                                     circleImages: [URL],
+                                     insertMethod: Inserter.Method) {
+        // Clipboard-fallback insert posts ⌘V then restores the pasteboard ~0.5s later.
+        // Writing captures before that races the paste and looks like "dictation failed".
+        let clipboardDelay: TimeInterval = insertMethod == .clipboard ? 0.55 : 0
+        let work = { [weak self] in
+            guard let self else { return }
+            if !circleImages.isEmpty {
+                if CircleCaptureSession.copyToClipboard(transcript: text, imageURLs: circleImages) {
+                    let n = circleImages.count
+                    self.hud.flashTarget("\(n) capture\(n == 1 ? "" : "s") on clipboard — ⌘V to attach", for: 3)
+                    Log.write("circle capture: \(n) image\(n == 1 ? "" : "s") on clipboard")
+                }
             }
+            self.circleCapture.discard()
         }
-        circleCapture.discard()
+        if clipboardDelay > 0 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + clipboardDelay, execute: work)
+        } else {
+            work()
+        }
     }
 
     /// One line per inserted dictation, so the phases can be compared across

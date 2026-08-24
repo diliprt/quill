@@ -45,9 +45,16 @@ final class CircleCaptureSession {
                        onError: @escaping (CircleCaptureError) -> Void) {
         guard mouseTimer == nil else { return }
         lastMouseLocation = nil
-        let timer = Timer(timeInterval: 1.0 / 60, repeats: true) { [weak self] _ in
-            Task { @MainActor in
-                self?.sampleMouse(onGesture: onGesture, onError: onError)
+        // Coalesce samples — a fresh Task per 60 Hz tick flooded the main queue and
+        // delayed STT HUD / insert work during dictation.
+        var samplePending = false
+        let timer = Timer(timeInterval: 1.0 / 30, repeats: true) { [weak self] _ in
+            guard let self, !samplePending else { return }
+            samplePending = true
+            Task { @MainActor [weak self] in
+                samplePending = false
+                guard let self else { return }
+                self.sampleMouse(onGesture: onGesture, onError: onError)
             }
         }
         mouseTimer = timer
@@ -60,12 +67,20 @@ final class CircleCaptureSession {
         lastMouseLocation = nil
     }
 
-    func waitForCaptures() async {
+    func waitForCaptures(timeout: TimeInterval = 3.0) async {
+        guard !captureTasks.isEmpty else { return }
+        let deadline = Date().addingTimeInterval(timeout)
         for task in captureTasks {
+            if Date() >= deadline {
+                Log.write("circle capture: wait timed out — \(captureTasks.count) task(s) still pending")
+                break
+            }
             await task.value
         }
         captureTasks.removeAll(keepingCapacity: true)
     }
+
+    var hasPendingCaptures: Bool { !captureTasks.isEmpty }
 
     func discard() {
         stopTracking()
@@ -163,7 +178,7 @@ private enum CircleScreenshot {
         let image: CGImage
         if #available(macOS 15.2, *) {
             image = try await SCScreenshotManager.captureImage(in: displayRegion)
-        } else if #available(macOS 12.3, *) {
+        } else if #available(macOS 14.0, *) {
             image = try await captureViaShareableContent(displayRegion: displayRegion, center: gesture.center)
         } else {
             guard let legacy = CGDisplayCreateImage(displayID(containing: gesture.center)) else {
@@ -182,7 +197,7 @@ private enum CircleScreenshot {
         return url
     }
 
-    @available(macOS 12.3, *)
+    @available(macOS 14.0, *)
     private static func captureViaShareableContent(displayRegion: CGRect, center: CGPoint) async throws -> CGImage {
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
         guard let display = content.displays.first(where: { $0.frame.contains(center) }) else {

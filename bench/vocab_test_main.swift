@@ -3,6 +3,10 @@ import Foundation
 // Deterministic checks for the correction-learning pipeline
 // (Vocabulary.learnFromUserEdit / learnFromCleanup) — the logic behind
 // "Learn from my edits after paste".
+//
+// WARNING: run via the Linux bench harness only. On macOS this binary
+// resolves the REAL ~/Library/Application Support path (HOME overrides are
+// ignored by FileManager) and clearAll() will wipe the user's dictionary.
 
 var failures = 0
 func expect(_ condition: Bool, _ label: String) {
@@ -85,6 +89,41 @@ _ = Vocabulary.learnFromUserEdit(
     fieldAfter: "make it much better")
 expect(entry("better") == nil && entry("much") == nil,
        "common words never stored")
+
+// 9. Real standalone words are never stored as mishearing aliases
+//    ("Git" → "GitHub" made cleanup rewrite ordinary speech).
+Vocabulary.clearAll()
+_ = Vocabulary.learnFromUserEdit(
+    original: "push it to Git today",
+    fieldBefore: "push it to Git today",
+    fieldAfter: "push it to GitHub today")
+expect(entry("GitHub")?.aliases.contains { $0.caseInsensitiveCompare("Git") == .orderedSame } != true,
+       "alias stoplist: Git never becomes an alias of GitHub")
+
+// 10. An alias may not be an existing canonical term (no self-fighting clusters).
+Vocabulary.clearAll()
+_ = Vocabulary.addManual("Origin Arc")
+_ = Vocabulary.learnFromCleanup(raw: "ship the origin arc build",
+                                cleaned: "ship the Origin Ark Studio build")
+let arkAliases = entry("Origin Ark Studio")?.aliases ?? []
+expect(!arkAliases.contains { $0.caseInsensitiveCompare("Origin Arc") == .orderedSame },
+       "existing canonical term never stored as another term's alias")
+
+// 11. A wholesale rewrite teaches nothing (it is not a correction).
+Vocabulary.clearAll()
+let rewriteLearned = Vocabulary.learnFromUserEdit(
+    original: "tell the Fenwick team the rollout for Brastel is Tuesday",
+    fieldBefore: "tell the Fenwick team the rollout for Brastel is Tuesday",
+    fieldAfter: "completely different sentence about Zanzibar shipping Quarzite pallets")
+expect(rewriteLearned == 0, "wholesale rewrite learns nothing")
+
+// 12. Short ordinary-shaped words never become new terms via substitutions.
+Vocabulary.clearAll()
+_ = Vocabulary.learnFromUserEdit(
+    original: "please Sand the file",
+    fieldBefore: "please Sand the file",
+    fieldAfter: "please Send the file")
+expect(entry("Send") == nil, "4-letter plain word Send not stored as vocabulary")
 
 Vocabulary.clearAll()
 print(failures == 0 ? "VOCAB_TEST_OK" : "VOCAB_TEST_FAILED (\(failures))")

@@ -8,14 +8,17 @@ import Foundation
 final class SpeculativeCleanup {
 
     let input: String
+    let style: Cleaner.Style
     let startedAt = Date()
 
     private var outcome: Cleaner.Outcome?
     private var waiter: ((Cleaner.Outcome) -> Void)?
 
-    init(input: String, token: String, context: Inserter.CleanupContext?) {
+    init(input: String, token: String, style: Cleaner.Style = .light,
+         context: Inserter.CleanupContext?) {
         self.input = input
-        Cleaner.clean(input, token: token, context: context) { [weak self] outcome in
+        self.style = style
+        Cleaner.clean(input, token: token, style: style, context: context) { [weak self] outcome in
             guard let self else { return }
             self.outcome = outcome
             self.waiter?(outcome)

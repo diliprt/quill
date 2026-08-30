@@ -34,6 +34,8 @@ enum Defaults {
     static let cleanupSpeculative = "cleanupSpeculative"
     /// Insert raw text immediately, then replace it only when a safe AX swap is possible.
     static let cleanupEagerInsert = "cleanupEagerInsert"
+    /// How hard the smart key edits: light / auto (detailed for long-form) / detailed.
+    static let cleanupStyle = "cleanupStyle"
     /// Learn unique personal terms into the local vocabulary file.
     static let vocabLearning = "vocabLearning"
     /// After paste, re-read the field and learn from hand edits.
@@ -65,6 +67,7 @@ enum Defaults {
             cleanupNearbyContext: false,
             cleanupSpeculative: false,
             cleanupEagerInsert: false,
+            cleanupStyle: CleanupStyleMode.auto.rawValue,
             vocabLearning: true,
             vocabLearnFromEdits: true,
             keepHistory: true,
@@ -80,6 +83,18 @@ enum Defaults {
     static var speculativeCleanupIsOn: Bool { bool(cleanupSpeculative) }
 
     static var eagerInsertIsOn: Bool { bool(cleanupEagerInsert) }
+
+    /// Menu-selectable cleanup depth. `auto` = light normally, detailed once a
+    /// dictation runs long enough to read like a paragraph of speech.
+    enum CleanupStyleMode: String, CaseIterable {
+        case light
+        case auto
+        case detailed
+    }
+
+    static var cleanupStyleMode: CleanupStyleMode {
+        CleanupStyleMode(rawValue: UserDefaults.standard.string(forKey: cleanupStyle) ?? "") ?? .auto
+    }
 
     static func bool(_ key: String) -> Bool { UserDefaults.standard.bool(forKey: key) }
 
@@ -160,6 +175,10 @@ final class QuillApp: NSObject, NSApplicationDelegate {
     private var holdCommitted = false
     /// This session should run Grok cleanup after STT (smart key).
     private var sessionUsesCleanup = false
+    /// Resolved at stop from the style menu + dictation length (Auto mode).
+    private var sessionCleanupStyle: Cleaner.Style = .light
+    /// Auto mode: dictations at least this long get the detailed editor.
+    private static let detailedCleanupThresholdSeconds: TimeInterval = 10
     private var pendingPCM: [Data] = []
     private var socketReady = false
     private var sawAnyText = false
@@ -536,6 +555,32 @@ final class QuillApp: NSObject, NSApplicationDelegate {
             + "and the field is Accessibility-writable. Toggle anytime for A/B."
         cleanupMenu.addItem(eagerItem)
         cleanupMenu.addItem(.separator())
+        let styleHeader = NSMenuItem(title: "Cleanup style", action: nil, keyEquivalent: "")
+        styleHeader.isEnabled = false
+        cleanupMenu.addItem(styleHeader)
+        let styleOptions: [(Defaults.CleanupStyleMode, String, String)] = [
+            (.light, "Light — punctuation and typos only",
+             "Fixes punctuation, capitalisation, and obvious typos. "
+                + "Never rewords or restructures what you said."),
+            (.auto, "Detailed for long dictations (10s+)",
+             "Short dictations stay light. Anything you speak for 10 seconds or "
+                + "more gets the detailed editor: word order, false starts, and "
+                + "run-ons fixed so it reads as written English."),
+            (.detailed, "Always detailed",
+             "Every smart dictation gets the full grammar edit. Content, order, "
+                + "and tone are preserved; phrasing is polished."),
+        ]
+        for (mode, title, tip) in styleOptions {
+            let item = NSMenuItem(title: title,
+                                  action: #selector(setCleanupStyle(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = mode.rawValue
+            item.state = Defaults.cleanupStyleMode == mode ? .on : .off
+            item.isEnabled = Defaults.cleanupIsOn
+            item.toolTip = tip
+            cleanupMenu.addItem(item)
+        }
+        cleanupMenu.addItem(.separator())
         let smartKeyHeader = NSMenuItem(title: "Smart key (Grok cleanup)", action: nil, keyEquivalent: "")
         smartKeyHeader.isEnabled = false
         cleanupMenu.addItem(smartKeyHeader)
@@ -852,6 +897,22 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         hud.apply(.notice(on
             ? "Raw pastes first — Grok polish swaps in when safe"
             : "Cleaned dictation waits for Grok before pasting"))
+        hud.collapse(after: 2.5)
+    }
+
+    @objc private func setCleanupStyle(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String,
+              let mode = Defaults.CleanupStyleMode(rawValue: raw) else { return }
+        UserDefaults.standard.set(mode.rawValue, forKey: Defaults.cleanupStyle)
+        Log.write("cleanup style set to \(mode.rawValue)")
+        buildStatusItem()
+        let notice: String
+        switch mode {
+        case .light:    notice = "Light cleanup — punctuation and typos only"
+        case .auto:     notice = "Detailed cleanup for dictations of 10s or longer"
+        case .detailed: notice = "Detailed cleanup for every smart dictation"
+        }
+        hud.apply(.notice(notice))
         hud.collapse(after: 2.5)
     }
 
@@ -1650,12 +1711,27 @@ final class QuillApp: NSObject, NSApplicationDelegate {
             case .hotkey: return "hotkey/pill"
             }
         }()
-        Log.write("stop (\(reasonLabel)) — finalising, sawText=\(sawAnyText) cleanup=\(sessionUsesCleanup)")
+        sessionCleanupStyle = resolvedCleanupStyle()
+        Log.write("stop (\(reasonLabel)) — finalising, sawText=\(sawAnyText) cleanup=\(sessionUsesCleanup)"
+            + (sessionUsesCleanup ? " style=\(sessionCleanupStyle.rawValue)" : ""))
         finaliseStartedAt = Date()
         logAudioState()
         hud.apply(.thinking)
         if sessionUsesCleanup, Defaults.speculativeCleanupIsOn { startSpeculativeCleanup() }
         stt?.finish()
+    }
+
+    /// Style menu → this session's editing depth. In Auto, long-form dictation
+    /// (10s+) gets the detailed editor: that is where spoken phrasing piles up,
+    /// and where an extra beat of cleanup latency is invisible anyway.
+    private func resolvedCleanupStyle() -> Cleaner.Style {
+        switch Defaults.cleanupStyleMode {
+        case .light: return .light
+        case .detailed: return .detailed
+        case .auto:
+            let seconds = startedAt.map { Date().timeIntervalSince($0) } ?? 0
+            return seconds >= Self.detailedCleanupThresholdSeconds ? .detailed : .light
+        }
     }
 
     /// Send the cleanup request now, on the transcript as it stands, so Grok
@@ -1675,6 +1751,7 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         guard let creds = Auth.load() else { return }
         speculative = SpeculativeCleanup(input: snapshot,
                                          token: creds.token,
+                                         style: sessionCleanupStyle,
                                          context: cleanupContext())
         Log.write("cleanup speculative fired for \(snapshot.count) chars")
     }
@@ -1758,8 +1835,10 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         if wantsCleanup, let creds = Auth.load() {
             laneLabel = "smart"
             // Already formatted and structurally trivial: the corrector would be
-            // a no-op, so skip the round-trip and insert as spoken.
-            if Cleaner.alreadyClean(trimmed) {
+            // a no-op, so skip the round-trip and insert as spoken. Detailed
+            // style always goes to the model — "clean" formatting says nothing
+            // about spoken-phrasing grammar.
+            if sessionCleanupStyle == .light, Cleaner.alreadyClean(trimmed) {
                 specSnapshot = nil
                 speculativeLabel = "local"
                 Log.write("cleanup local fast-path — already clean (\(trimmed.count) chars)")
@@ -1774,7 +1853,9 @@ final class QuillApp: NSObject, NSApplicationDelegate {
             }
             specSnapshot = nil
 
-            let hit = spec?.matches(final: trimmed) ?? false
+            // A speculative result only counts when it was produced with the
+            // same editing depth this session resolved to.
+            let hit = spec.map { $0.style == sessionCleanupStyle && $0.matches(final: trimmed) } ?? false
             // No request in flight can only mean there was no partial at stop
             // (speculation itself never pauses any more).
             if Defaults.speculativeCleanupIsOn, spec == nil {
@@ -1810,7 +1891,8 @@ final class QuillApp: NSObject, NSApplicationDelegate {
                         completion(outcome)
                     }
                 } else {
-                    Cleaner.clean(trimmed, token: creds.token, context: context,
+                    Cleaner.clean(trimmed, token: creds.token,
+                                  style: sessionCleanupStyle, context: context,
                                   completion: completion)
                 }
             }
@@ -1845,12 +1927,16 @@ final class QuillApp: NSObject, NSApplicationDelegate {
             // A speculative request has been running since stop, so only what is
             // left of its budget may still be waited on.
             var cleanupBudget = Cleaner.budgetSeconds(for: trimmed)
+            // Mirror Cleaner's detailed-budget extension or the fallback timer
+            // below would cut the request off before its own deadline.
+            if sessionCleanupStyle == .detailed { cleanupBudget = min(cleanupBudget * 1.5, 10) }
             if hit, let spec {
                 cleanupBudget = max(0.15, cleanupBudget - Date().timeIntervalSince(spec.startedAt))
             }
             let budgetLabel = String(format: "%.1f", cleanupBudget)
-            var flash = "cleaning with Grok… (≤\(budgetLabel)s)"
-            if vocabN > 0 { flash = "cleaning with Grok… (\(vocabN) terms, ≤\(budgetLabel)s)" }
+            let verb = sessionCleanupStyle == .detailed ? "detailed cleanup" : "cleaning"
+            var flash = "\(verb) with Grok… (≤\(budgetLabel)s)"
+            if vocabN > 0 { flash = "\(verb) with Grok… (\(vocabN) terms, ≤\(budgetLabel)s)" }
             if context != nil { flash += " · context" }
             hud.flashTarget(flash, for: cleanupBudget + 0.5)
             hud.update(text: trimmed)
@@ -1861,7 +1947,11 @@ final class QuillApp: NSObject, NSApplicationDelegate {
                 self.cleanupSeconds = Date().timeIntervalSince(enteredAt)
                 switch outcome {
                 case .cleaned(let polished):
-                    Vocabulary.learnFromCleanup(raw: trimmed, cleaned: polished)
+                    // Detailed edits reword — pairing their words with the raw
+                    // transcript would teach rewordings as "mishearings".
+                    if self.sessionCleanupStyle == .light {
+                        Vocabulary.learnFromCleanup(raw: trimmed, cleaned: polished)
+                    }
                     self.deliverInsert(polished, notedCleanup: true, circleImages: circleImages)
                 case .failed(let message):
                     Log.write("cleanup failed — using raw: \(message)")
@@ -1900,7 +1990,9 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         if Inserter.polishInPlace(replacing: raw, with: polished) {
             let ms = Int((Date().timeIntervalSince(startedAt) * 1000).rounded())
             Log.write("polish swapped in place +\(ms)ms after final")
-            Vocabulary.learnFromCleanup(raw: raw, cleaned: polished)
+            if sessionCleanupStyle == .light {
+                Vocabulary.learnFromCleanup(raw: raw, cleaned: polished)
+            }
             hud.flashTarget("✦ polished", for: 1.2)
             hud.update(text: polished)
             armEditWatch(afterInserting: polished)

@@ -1665,16 +1665,13 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         let snapshot = VoiceCommands.stripAll(stt?.transcript ?? "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !snapshot.isEmpty else { return }
-        // Already-clean text takes the local fast-path in finishSession —
-        // a speculative request for it would be pure waste.
-        guard !Cleaner.alreadyClean(snapshot) else { return }
+        // Fire even when the partial already looks clean: partials lag speech,
+        // and a clean-looking fragment regularly grows into a final that needs
+        // the full cleanup — skipping here forced the serial round-trip on
+        // exactly the longest dictations. If the final really is clean it takes
+        // the local fast-path and the request is one cheap discard.
         specSnapshot = snapshot
 
-        let history = SpeculationGovernor.history()
-        guard SpeculationGovernor.shouldSpeculate(history: history) else {
-            Log.write("cleanup speculative paused — \(SpeculationGovernor.describe(history))")
-            return
-        }
         guard let creds = Auth.load() else { return }
         speculative = SpeculativeCleanup(input: snapshot,
                                          token: creds.token,
@@ -1778,8 +1775,10 @@ final class QuillApp: NSObject, NSApplicationDelegate {
             specSnapshot = nil
 
             let hit = spec?.matches(final: trimmed) ?? false
+            // No request in flight can only mean there was no partial at stop
+            // (speculation itself never pauses any more).
             if Defaults.speculativeCleanupIsOn, spec == nil {
-                speculativeLabel = "paused"
+                speculativeLabel = "none"
             } else if hit {
                 speculativeLabel = "hit"
             } else if spec != nil {

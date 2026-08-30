@@ -31,8 +31,14 @@ enum CircleDelivery {
     }
 
     /// Focus settle before writing into the frontmost app after key release / click.
+    ///
+    /// The longer hold settle exists for the circle-capture Alt+Tab dance
+    /// (circle → switch app → release). It is keyed on the session actually
+    /// having captures, not on the feature toggle: with capture merely ON,
+    /// every plain dictation was paying +160ms for an app switch that never
+    /// happened (~70% of all inserts in real logs).
     static func settleSeconds(stop: StopKind,
-                              circleCaptureEnabled: Bool,
+                              sessionHasCaptures: Bool,
                               deliveringCircleImages: Bool) -> TimeInterval {
         if deliveringCircleImages {
             switch stop {
@@ -43,7 +49,7 @@ enum CircleDelivery {
         }
         switch stop {
         case .click: return 0.22
-        case .hold:  return circleCaptureEnabled ? 0.32 : 0.16
+        case .hold:  return sessionHasCaptures ? 0.32 : 0.16
         case .other: return 0.16
         }
     }

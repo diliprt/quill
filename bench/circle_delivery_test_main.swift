@@ -24,15 +24,15 @@ expect(CircleDelivery.mode(circleImageCount: 3) == .textThenImagesOnClipboard,
 
 // MARK: - Settle timing (Alt+Tab focus)
 
-expect(CircleDelivery.settleSeconds(stop: .hold, circleCaptureEnabled: false, deliveringCircleImages: false) == 0.16,
-       "hold, circle off → short settle")
-expect(CircleDelivery.settleSeconds(stop: .hold, circleCaptureEnabled: true, deliveringCircleImages: false) == 0.32,
-       "hold, circle on, no image → longer settle for Alt+Tab")
-expect(CircleDelivery.settleSeconds(stop: .hold, circleCaptureEnabled: true, deliveringCircleImages: true) == 0.32,
+expect(CircleDelivery.settleSeconds(stop: .hold, sessionHasCaptures: false, deliveringCircleImages: false) == 0.16,
+       "hold, no captures this session → short settle (even with capture enabled)")
+expect(CircleDelivery.settleSeconds(stop: .hold, sessionHasCaptures: true, deliveringCircleImages: false) == 0.32,
+       "hold, captures taken, no image in this delivery → longer settle for Alt+Tab")
+expect(CircleDelivery.settleSeconds(stop: .hold, sessionHasCaptures: true, deliveringCircleImages: true) == 0.32,
        "hold with captures → 0.32s settle")
-expect(CircleDelivery.settleSeconds(stop: .click, circleCaptureEnabled: true, deliveringCircleImages: true) == 0.22,
+expect(CircleDelivery.settleSeconds(stop: .click, sessionHasCaptures: true, deliveringCircleImages: true) == 0.22,
        "click with captures → 0.22s settle")
-expect(CircleDelivery.settleSeconds(stop: .other, circleCaptureEnabled: false, deliveringCircleImages: false) == 0.16,
+expect(CircleDelivery.settleSeconds(stop: .other, sessionHasCaptures: false, deliveringCircleImages: false) == 0.16,
        "hotkey/voice stop → 0.16s settle")
 
 // MARK: - Image clipboard delay after text insert

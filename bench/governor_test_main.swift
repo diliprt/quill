@@ -13,33 +13,13 @@ func expect(_ condition: Bool, _ label: String) {
     }
 }
 
-// Below minSamples: always speculate (still learning).
+// Speculation never pauses: a miss finishes no later than not speculating,
+// while pausing forces the full serial cleanup wait on every dictation.
 expect(SpeculationGovernor.shouldSpeculate(history: []), "empty history speculates")
-expect(SpeculationGovernor.shouldSpeculate(history: Array(repeating: false, count: 7)),
-       "7 misses still speculates (below minSamples)")
-
-// Misses dominate: pause.
-expect(!SpeculationGovernor.shouldSpeculate(history: Array(repeating: false, count: 8)),
-       "8 misses pauses")
-expect(!SpeculationGovernor.shouldSpeculate(
-        history: [true, true, false, false, false, false, false, false, false, false]),
-       "2/10 hits pauses")
-
-// Hits dominate: speculate.
+expect(SpeculationGovernor.shouldSpeculate(history: Array(repeating: false, count: 12)),
+       "all misses still speculates (pausing only ever cost latency)")
 expect(SpeculationGovernor.shouldSpeculate(history: Array(repeating: true, count: 12)),
-       "12 hits speculates")
-expect(SpeculationGovernor.shouldSpeculate(
-        history: [false, false, false, true, true, true, true, false, true, true]),
-       "6/10 hits speculates")
-
-// Only the window counts: old misses roll off.
-let oldMissesRecentHits = Array(repeating: false, count: 20) + Array(repeating: true, count: 12)
-expect(SpeculationGovernor.shouldSpeculate(history: oldMissesRecentHits),
-       "20 old misses forgiven by 12 recent hits")
-
-// Boundary: exactly minHitRate stays on.
-let boundary = Array(repeating: true, count: 4) + Array(repeating: false, count: 6)
-expect(SpeculationGovernor.shouldSpeculate(history: boundary), "4/10 = 40% stays on")
+       "all hits speculates")
 
 // Equivalence normalization.
 expect(SpeculativeCleanup.equivalent("hello world", "hello world."),

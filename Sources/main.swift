@@ -163,6 +163,15 @@ final class QuillApp: NSObject, NSApplicationDelegate {
     private var pendingPCM: [Data] = []
     private var socketReady = false
     private var sawAnyText = false
+    /// Everything sent to STT this session, kept so a dead connection can be
+    /// replayed once instead of losing the sentence ("Heard you, but no
+    /// transcript came back"). Capped; overflow disables rescue for the session.
+    private var rescuePCM: [Data] = []
+    private var rescuePCMBytes = 0
+    private var rescueOverflowed = false
+    private var sttRescueUsed = false
+    /// ~60s of 48kHz mono 16-bit PCM — far beyond the 10s window rescue targets.
+    private static let rescuePCMCap = 6 * 1024 * 1024
     private var stopReason: StopReason = .hotkey
     private var didRunVoiceCommand = false
     private var finaliseStartedAt: Date?
@@ -1193,74 +1202,22 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         pendingPCM = []
         socketReady = false
         sawAnyText = false
+        rescuePCM = []
+        rescuePCMBytes = 0
+        rescueOverflowed = false
+        sttRescueUsed = false
         speculative = nil
         specSnapshot = nil
         stopReason = sessionFromHold ? .hold : .hotkey
         didRunVoiceCommand = false
         lastStopCandidate = nil
 
-        client.onReady = { [weak self] in
-            guard let self else { return }
-            self.socketReady = true
-            for chunk in self.pendingPCM { client.send(pcm: chunk) }
-            self.pendingPCM = []
-        }
-        client.onText = { [weak self] text in
-            guard let self, !text.isEmpty else { return }
-            self.sawAnyText = true
-
-            if !self.didRunVoiceCommand, VoiceCommands.containsOpenGrok(text) {
-                self.didRunVoiceCommand = true
-                self.runOpenGrok()
-            }
-
-            self.considerVoiceStop(after: text)
-            // Hold-to-talk: release is the stop — skip auto-finish pause watch signals.
-            // Only NEW words count as activity (unchanged partials re-fire constantly).
-            if !self.sessionFromHold, text != self.lastActivityText {
-                self.lastActivityText = text
-                self.noteVoiceActivity()
-            }
-
-            // Show what will actually be inserted, command phrases already removed.
-            let preview = VoiceCommands.stripAll(text)
-            self.hud.update(text: self.sessionUsesCleanup ? "✦ \(preview)" : preview)
-        }
-        let sessionGeneration = polishGeneration
-        client.onComplete = { [weak self] text in
-            self?.finishSession(with: text, generation: sessionGeneration)
-        }
-        client.onFailure = { [weak self] failure in
-            guard let self, sessionGeneration == self.polishGeneration else { return }
-            self.abortSession(message: failure.message)
-        }
-
-        // Term hints are part of the cleanup path only. On the raw key the user
-        // wants exactly what was said, with nothing biasing the recogniser —
-        // hinting there pulled ordinary words onto dictionary terms.
-        let useKeyterms = sessionUsesCleanup && Defaults.bool(Defaults.sttKeyterms)
-        client.connect(token: creds.token,
-                       language: UserDefaults.standard.string(forKey: Defaults.language) ?? "en",
-                       keyterms: useKeyterms ? Vocabulary.keyterms() : [])
+        wireSTT(client: client, token: creds.token, replay: [])
 
         if sessionUsesCleanup {
             // Pay for the cleanup TLS handshake now, while the user is still
             // speaking, instead of after the transcript lands.
             Cleaner.warm(token: creds.token)
-        }
-
-        // Hops to main because this fires on the audio render thread, where
-        // `socketReady` and `pendingPCM` would otherwise be read and mutated
-        // concurrently with the main-queue flush in `onReady` — an unsynchronised
-        // Array mutation, and exactly at socket-open time. The main queue is
-        // serial and FIFO, so chunk order is preserved; it also keeps the
-        // websocket send off the render thread.
-        recorder.onPCM = { [weak self] data in
-            DispatchQueue.main.async {
-                guard let self else { return }
-                if self.socketReady { client.send(pcm: data) }
-                else if self.pendingPCM.count < 200 { self.pendingPCM.append(data) }
-            }
         }
         recorder.onLevel = { [weak self] level in
             DispatchQueue.main.async {
@@ -1290,6 +1247,126 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         }
 
         enterRecordingState()
+    }
+
+    /// Wire an STT client into the live session and connect it. Shared by the
+    /// session start and the mid-session rescue reconnect; `replay` is PCM
+    /// already captured this session, sent ahead of anything queued so the
+    /// server hears the audio in order.
+    private func wireSTT(client: STTClient, token: String, replay: [Data]) {
+        client.onReady = { [weak self] in
+            guard let self, self.stt === client else { return }
+            self.socketReady = true
+            for chunk in replay { client.send(pcm: chunk) }
+            for chunk in self.pendingPCM { client.send(pcm: chunk) }
+            self.pendingPCM = []
+        }
+        client.onText = { [weak self] text in
+            guard let self, self.stt === client, !text.isEmpty else { return }
+            self.sawAnyText = true
+
+            if !self.didRunVoiceCommand, VoiceCommands.containsOpenGrok(text) {
+                self.didRunVoiceCommand = true
+                self.runOpenGrok()
+            }
+
+            self.considerVoiceStop(after: text)
+            // Hold-to-talk: release is the stop — skip auto-finish pause watch signals.
+            // Only NEW words count as activity (unchanged partials re-fire constantly).
+            if !self.sessionFromHold, text != self.lastActivityText {
+                self.lastActivityText = text
+                self.noteVoiceActivity()
+            }
+
+            // Show what will actually be inserted, command phrases already removed.
+            let preview = VoiceCommands.stripAll(text)
+            self.hud.update(text: self.sessionUsesCleanup ? "✦ \(preview)" : preview)
+        }
+        let sessionGeneration = polishGeneration
+        client.onComplete = { [weak self] text in
+            guard let self, self.stt === client else { return }
+            self.finishSession(with: text, generation: sessionGeneration)
+        }
+        client.onFailure = { [weak self] failure in
+            guard let self, self.stt === client,
+                  sessionGeneration == self.polishGeneration else { return }
+            self.abortSession(message: failure.message)
+        }
+
+        // Term hints are part of the cleanup path only. On the raw key the user
+        // wants exactly what was said, with nothing biasing the recogniser —
+        // hinting there pulled ordinary words onto dictionary terms.
+        let useKeyterms = sessionUsesCleanup && Defaults.bool(Defaults.sttKeyterms)
+        client.connect(token: token,
+                       language: UserDefaults.standard.string(forKey: Defaults.language) ?? "en",
+                       keyterms: useKeyterms ? Vocabulary.keyterms() : [])
+
+        // Hops to main because this fires on the audio render thread, where
+        // `socketReady` and `pendingPCM` would otherwise be read and mutated
+        // concurrently with the main-queue flush in `onReady` — an unsynchronised
+        // Array mutation, and exactly at socket-open time. The main queue is
+        // serial and FIFO, so chunk order is preserved; it also keeps the
+        // websocket send off the render thread.
+        recorder.onPCM = { [weak self] data in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.bufferRescuePCM(data)
+                if self.socketReady { client.send(pcm: data) }
+                else if self.pendingPCM.count < 200 { self.pendingPCM.append(data) }
+            }
+        }
+    }
+
+    /// Frees the replay buffer (up to ~6MB) once the session can no longer
+    /// need a rescue.
+    private func clearRescueBuffer() {
+        rescuePCM = []
+        rescuePCMBytes = 0
+    }
+
+    /// Main queue only. Keeps the session's PCM replayable for `attemptSTTRescue`.
+    private func bufferRescuePCM(_ data: Data) {
+        guard !rescueOverflowed else { return }
+        rescuePCMBytes += data.count
+        guard rescuePCMBytes <= Self.rescuePCMCap else {
+            rescuePCM = []
+            rescueOverflowed = true
+            return
+        }
+        rescuePCM.append(data)
+    }
+
+    /// One-shot mid-session reconnect. Audio is flowing and the socket opened,
+    /// but the server has said nothing for 10s — previously this aborted with
+    /// "Heard you, but no transcript came back" and the sentence was lost.
+    /// The PCM is still in memory, so reconnect and replay it instead.
+    private func attemptSTTRescue() -> Bool {
+        guard !sttRescueUsed, !rescueOverflowed, !rescuePCM.isEmpty else { return false }
+        // Only rescue the server-silent case; mic and network failures have
+        // their own diagnosis and a reconnect would not help.
+        guard socketReady, recorder.framesCaptured > 0,
+              recorder.peakLevel >= 0.004 else { return false }
+        guard let creds = Auth.load() else { return false }
+        sttRescueUsed = true
+        let replay = rescuePCM
+        Log.write("stt rescue — no transcript after 10s; reconnecting and replaying "
+            + "\(replay.count) chunk(s), \(rescuePCMBytes / 1024)KB")
+        hud.flashTarget("reconnecting speech-to-text…", for: 2)
+        stt?.cancel()
+        let client = STTClient()
+        stt = client
+        socketReady = false
+        pendingPCM = []
+        wireSTT(client: client, token: creds.token, replay: replay)
+
+        // The fresh connection gets its own 10s window before giving up for real.
+        silenceTimer?.invalidate()
+        silenceTimer = Timer.scheduledTimer(withTimeInterval: 10, repeats: false) { [weak self] _ in
+            guard let self, self.isRecording, !self.sawAnyText else { return }
+            self.logAudioState()
+            self.abortSession(message: self.diagnosis())
+        }
+        return true
     }
 
     private func enterRecordingState() {
@@ -1344,6 +1421,7 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         silenceTimer = Timer.scheduledTimer(withTimeInterval: 10, repeats: false) { [weak self] _ in
             guard let self, self.isRecording, !self.sawAnyText else { return }
             self.logAudioState()
+            if self.attemptSTTRescue() { return }
             self.abortSession(message: self.diagnosis())
         }
         maxDurationTimer = Timer.scheduledTimer(withTimeInterval: 300, repeats: false) { [weak self] _ in
@@ -1461,6 +1539,7 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         // which would make a legitimate in-flight transcript look superseded.
         speculative = nil
         specSnapshot = nil
+        clearRescueBuffer()
         // Pending arm (mic auth not finished yet): clear flags so the auth
         // callback will not start a ghost capture.
         if !isRecording {
@@ -1624,6 +1703,7 @@ final class QuillApp: NSObject, NSApplicationDelegate {
             return
         }
         stt = nil
+        clearRescueBuffer()
         let enteredAt = Date()
         finishEnteredAt = enteredAt
         cleanupSeconds = 0
@@ -1921,7 +2001,7 @@ final class QuillApp: NSObject, NSApplicationDelegate {
                 case .hotkey, .voice: return .other
                 }
             }(),
-            circleCaptureEnabled: Defaults.circleCaptureIsOn,
+            sessionHasCaptures: !circleImages.isEmpty,
             deliveringCircleImages: false
         )
 
@@ -1976,7 +2056,7 @@ final class QuillApp: NSObject, NSApplicationDelegate {
                 case .hotkey, .voice: return .other
                 }
             }(),
-            circleCaptureEnabled: Defaults.circleCaptureIsOn,
+            sessionHasCaptures: true,
             deliveringCircleImages: true
         )
 
@@ -2073,6 +2153,7 @@ final class QuillApp: NSObject, NSApplicationDelegate {
     private func abortSession(message: String) {
         Log.write("aborted — \(message)")
         invalidatePendingPolish()
+        clearRescueBuffer()
         isRecording = false
         sessionFromHold = false
         sessionUsesCleanup = false
@@ -2169,13 +2250,18 @@ final class PostInsertEditWatch {
 
         // Let paste settle, then snapshot the field.
         DispatchQueue.main.asyncAfter(deadline: .now() + settleDelay) { [weak self] in
-            self?.snapshotAndArm(retryAfterAXNudge: true)
+            self?.snapshotAndArm(retriesLeft: PostInsertEditWatch.snapshotRetryDelays.count)
         }
     }
 
+    /// Electron apps build their AX tree lazily after the AXManualAccessibility
+    /// nudge — one 0.45s retry lost ~44 of ~320 sessions' worth of corrections
+    /// in real logs, so give the tree up to ~3s to appear before giving up.
+    private static let snapshotRetryDelays: [TimeInterval] = [0.45, 0.9, 1.6]
+
     /// First read failing may just mean an Electron app hasn't built its AX
-    /// tree yet — nudge it awake once and retry before giving up.
-    private func snapshotAndArm(retryAfterAXNudge: Bool) {
+    /// tree yet — nudge it awake and retry with patience before giving up.
+    private func snapshotAndArm(retriesLeft: Int) {
         guard !original.isEmpty else { return }
         // Two arming closures can be in flight at once (eager insert arms for
         // the raw text, the polish swap arms again). Without this the earlier
@@ -2184,11 +2270,18 @@ final class PostInsertEditWatch {
         timer?.invalidate()
         timer = nil
         guard let snapshot = Inserter.focusedFieldValue(), !snapshot.isEmpty else {
-            if retryAfterAXNudge, Inserter.encourageAXExposure() {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { [weak self] in
-                    self?.snapshotAndArm(retryAfterAXNudge: false)
+            let delays = PostInsertEditWatch.snapshotRetryDelays
+            if retriesLeft > 0 {
+                // Nudge only on the first failure; later retries just wait
+                // for the tree the nudge already requested.
+                let isFirstFailure = retriesLeft == delays.count
+                if !isFirstFailure || Inserter.encourageAXExposure() {
+                    let delay = delays[delays.count - retriesLeft]
+                    DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                        self?.snapshotAndArm(retriesLeft: retriesLeft - 1)
+                    }
+                    return
                 }
-                return
             }
             Log.write("vocab: edit-watch skipped — field not readable via Accessibility")
             cancel()

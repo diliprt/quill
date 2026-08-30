@@ -8,14 +8,17 @@ import Foundation
 final class SpeculativeCleanup {
 
     let input: String
+    let style: Cleaner.Style
     let startedAt = Date()
 
     private var outcome: Cleaner.Outcome?
     private var waiter: ((Cleaner.Outcome) -> Void)?
 
-    init(input: String, token: String, context: Inserter.CleanupContext?) {
+    init(input: String, token: String, style: Cleaner.Style = .light,
+         context: Inserter.CleanupContext?) {
         self.input = input
-        Cleaner.clean(input, token: token, context: context) { [weak self] outcome in
+        self.style = style
+        Cleaner.clean(input, token: token, style: style, context: context) { [weak self] outcome in
             guard let self else { return }
             self.outcome = outcome
             self.waiter?(outcome)
@@ -54,22 +57,19 @@ final class SpeculativeCleanup {
     }
 }
 
-/// Rolling hit-rate governor: speculation costs a wasted request on every
-/// miss, so when misses dominate recent sessions it pauses itself, and —
-/// because outcomes keep being recorded even while paused — resumes on its
-/// own when the final transcripts start matching the partials again.
+/// Hit-rate tracker for speculative cleanup. Outcomes are recorded for the
+/// `spec=` latency labels and diagnostics, but speculation is never paused:
+/// a miss costs one wasted request and finishes no later than not speculating
+/// at all, while pausing forces the full serial cleanup round-trip (~0.7–1.2s)
+/// on every dictation. Real logs showed the ten slowest inserts were all
+/// `spec=paused` — the governor only ever saved tokens, never time.
 enum SpeculationGovernor {
     static let window = 12
-    static let minSamples = 8
-    static let minHitRate = 0.4
 
     private static let outcomesKey = "speculativeOutcomes"
 
     static func shouldSpeculate(history: [Bool]) -> Bool {
-        let recent = Array(history.suffix(window))
-        guard recent.count >= minSamples else { return true }
-        let hits = recent.filter { $0 }.count
-        return Double(hits) / Double(recent.count) >= minHitRate
+        true
     }
 
     static func record(hit: Bool) {

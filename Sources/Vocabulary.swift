@@ -456,6 +456,16 @@ enum Vocabulary {
         let base = !oldMid.isEmpty ? oldMid : o
         let edited = !newMid.isEmpty ? newMid : fieldAfter
 
+        // A wholesale rewrite is not a correction. When most of the words
+        // changed, pairing old words with new ones taught garbage — single
+        // edits recorded up to 24 "updates" like "Comment" → "ChatGPT".
+        let baseWords = Set(tokenizeWords(base).map { $0.lowercased() })
+        let editedWords = Set(tokenizeWords(edited).map { $0.lowercased() })
+        if baseWords.count >= 4,
+           baseWords.intersection(editedWords).count * 2 < baseWords.count {
+            return 0
+        }
+
         // No meaningful change to our inserted text (only typed elsewhere).
         if edited.contains(o), oldMid.isEmpty || oldMid.contains(o) {
             // Still learn unique terms from any brand-new unique words in the edit span.
@@ -514,7 +524,8 @@ enum Vocabulary {
             for term in preferred {
                 if upsert(term, alias: nil, pinned: pinPreferred, into: &entries) { changed += 1 }
             }
-            for pair in aliasPairs {
+            // A single pass teaching many alias pairs is noise, not correction.
+            for pair in aliasPairs.prefix(3) {
                 if upsert(pair.preferred, alias: pair.alias, pinned: pinPreferred, into: &entries) {
                     changed += 1
                 }
@@ -532,10 +543,12 @@ enum Vocabulary {
         guard !a.isEmpty, !b.isEmpty else { return 0 }
 
         var changed = 0
+        let maxSubstitutions = 3
         // Similar-length sequences: pair by index.
         if abs(a.count - b.count) <= 2, min(a.count, b.count) >= 1 {
             let n = min(a.count, b.count)
             for i in 0..<n {
+                if changed >= maxSubstitutions { break }
                 let left = a[i], right = b[i]
                 if left.compare(right, options: .caseInsensitive) == .orderedSame { continue }
                 if isCommonWord(left), isCommonWord(right) { continue }
@@ -558,6 +571,7 @@ enum Vocabulary {
         let aUnique = a.filter { looksUnique($0) && !isCommonWord($0) }
         let bUnique = b.filter { looksUnique($0) && !isCommonWord($0) }
         for r in aUnique {
+            if changed >= maxSubstitutions { break }
             if bUnique.contains(where: { $0.compare(r, options: .caseInsensitive) == .orderedSame }) {
                 continue
             }
@@ -646,6 +660,16 @@ enum Vocabulary {
         return t.range(of: #"^\d+(\.\d+)?[A-Za-z]{0,2}$"#, options: .regularExpression) != nil
     }
 
+    /// Real words the user says on their own — never treat them as mishearings.
+    /// Learning them as aliases made cleanup rewrite ordinary speech into brand
+    /// names ("Git" → "GitHub", "Swift" → "Shift", "Comment" → "ChatGPT").
+    private static let aliasStoplist: Set<String> = [
+        "git", "swift", "short", "soft", "smart", "support", "comment", "commit",
+        "context", "quick", "grow", "live", "leave", "shared", "search", "searched",
+        "community", "mac", "pro", "free", "freeze", "product", "type", "send",
+        "ghost", "chat", "check", "share", "sure", "shift", "sort", "start",
+    ]
+
     /// An alias only earns its place if it is a plausible mishearing of the
     /// term. Edit-learning used to record whatever word happened to change,
     /// which taught "GitHub" was often heard as "written" — and then cleanup
@@ -655,6 +679,10 @@ enum Vocabulary {
         guard a.count >= 3 else { return false }
         guard a.caseInsensitiveCompare(term) != .orderedSame else { return false }
         guard !isCommonWord(a), !isQuantityToken(a) else { return false }
+        guard !aliasStoplist.contains(a.lowercased()) else { return false }
+        // An alias longer than the term it maps to is a phrase, not a mishearing
+        // ("Philippe" ← "Philippe Reddy").
+        guard a.count <= term.count + 4 else { return false }
         // Case-only variants ("gitlab" for "GitLab") are always fine; anything
         // else has to actually sound like the term.
         if a.caseInsensitiveCompare(term) == .orderedSame { return true }
@@ -672,6 +700,13 @@ enum Vocabulary {
         guard t.count >= 2, !isCommonWord(t) else { return false }
         guard pinned || !isQuantityToken(t) else { return false }
 
+        // An alias must not itself be a canonical term in the library:
+        // that is how self-fighting clusters formed ("Origin" ↔ "Origin Arc",
+        // Syanara/Signara/Synara all aliasing each other).
+        func aliasIsCanonical(_ a: String, in entries: [Entry]) -> Bool {
+            entries.contains { $0.term.caseInsensitiveCompare(a) == .orderedSame }
+        }
+
         let now = Date().timeIntervalSince1970
         if let i = entries.firstIndex(where: { $0.term.caseInsensitiveCompare(t) == .orderedSame }) {
             var e = entries[i]
@@ -685,6 +720,7 @@ enum Vocabulary {
             if let alias {
                 let a = alias.trimmingCharacters(in: .whitespacesAndNewlines)
                 if isUsableAlias(a, for: e.term),
+                   !aliasIsCanonical(a, in: entries),
                    !e.aliases.contains(where: { $0.caseInsensitiveCompare(a) == .orderedSame }) {
                     e.aliases.insert(a, at: 0)
                     if e.aliases.count > maxAliasesPerTerm {
@@ -700,12 +736,17 @@ enum Vocabulary {
         var aliases: [String] = []
         if let alias {
             let a = alias.trimmingCharacters(in: .whitespacesAndNewlines)
-            if isUsableAlias(a, for: t) {
+            if isUsableAlias(a, for: t), !aliasIsCanonical(a, in: entries) {
                 aliases = [a]
             }
         }
         // Only auto-add if clearly unique or pinned.
         if !pinned && !looksUnique(t) { return false }
+        // Ordinary-shaped single words (letters only, no camel/digit/acronym
+        // signal) need real length before they count as a name — edit-learning
+        // kept storing corrections like "Send", "Type", "Grow" as vocabulary.
+        if !pinned, !t.contains(" "), t.allSatisfy(\.isLetter),
+           !looksProductLike(t), t.count < 5 { return false }
         _ = promoteThreshold // reserved for future higher bar
         entries.append(Entry(term: t, aliases: aliases, count: 1, lastSeen: now, pinned: pinned))
         return true
@@ -770,11 +811,27 @@ enum Vocabulary {
             guard w.count >= 3 else { continue }
             guard let first = w.first, first.isUppercase else { continue }
             guard !isCommonWord(w) else { continue }
+            // "Start of sentence" is any token after . ! ? : or a newline — the
+            // old i == 0 check only caught the very first word of the text, so
+            // every mid-text sentence opener ("Send me…") was learned as a name.
+            let sentenceStart: Bool = {
+                guard i > 0 else { return true }
+                guard let prevLast = tokens[i - 1].last else { return true }
+                return ".!?:".contains(prevLast)
+            }()
+            // A capitalized neighbour means this word is part of a multi-word
+            // name — pattern 3 already stores the full phrase; storing the
+            // fragment too ("Console" from "Admin Console") only adds noise.
+            let prevCapitalized = i > 0 && !sentenceStart
+                && tokens[i - 1].first?.isUppercase == true
+            let nextCapitalized = i + 1 < tokens.count
+                && !".!?:".contains(tok.last ?? " ")
+                && tokens[i + 1].first?.isUppercase == true
+            let inPhrase = prevCapitalized || nextCapitalized
             // Require either product shape, non-ASCII, or longer uncommon proper name.
-            let sentenceStart = (i == 0)
             if looksProductLike(w) || w.unicodeScalars.contains(where: { $0.value > 127 }) {
                 keep(w)
-            } else if !sentenceStart, w.count >= 5, looksLikeProperName(w) {
+            } else if !sentenceStart, !inPhrase, w.count >= 5, looksLikeProperName(w) {
                 keep(w)
             }
         }
@@ -899,6 +956,12 @@ enum Vocabulary {
         "failed","error","success","ready","start","stop","finish","cancel","continue",
         "people","person","user","users","team","teams","client","clients","server",
         "model","models","local","remote","cloud","token","session","build","version",
+        // Observed polluting the library via edit/final-text learning:
+        "send","type","anything","manager","console","instead","human","elements",
+        "register","plan","device","private","vertical","professional","office",
+        "bottom","optional","responding","searched","search","compile","continuous",
+        "product","products","projects","shift","short","soft","grow","studio",
+        "waiting","thinking","greeting","personal","cleaner","copy","review",
     ]
 }
 

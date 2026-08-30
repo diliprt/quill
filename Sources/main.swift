@@ -34,6 +34,8 @@ enum Defaults {
     static let cleanupSpeculative = "cleanupSpeculative"
     /// Insert raw text immediately, then replace it only when a safe AX swap is possible.
     static let cleanupEagerInsert = "cleanupEagerInsert"
+    /// How hard the smart key edits: light / auto (detailed for long-form) / detailed.
+    static let cleanupStyle = "cleanupStyle"
     /// Learn unique personal terms into the local vocabulary file.
     static let vocabLearning = "vocabLearning"
     /// After paste, re-read the field and learn from hand edits.
@@ -65,6 +67,7 @@ enum Defaults {
             cleanupNearbyContext: false,
             cleanupSpeculative: false,
             cleanupEagerInsert: false,
+            cleanupStyle: CleanupStyleMode.auto.rawValue,
             vocabLearning: true,
             vocabLearnFromEdits: true,
             keepHistory: true,
@@ -80,6 +83,18 @@ enum Defaults {
     static var speculativeCleanupIsOn: Bool { bool(cleanupSpeculative) }
 
     static var eagerInsertIsOn: Bool { bool(cleanupEagerInsert) }
+
+    /// Menu-selectable cleanup depth. `auto` = light normally, detailed once a
+    /// dictation runs long enough to read like a paragraph of speech.
+    enum CleanupStyleMode: String, CaseIterable {
+        case light
+        case auto
+        case detailed
+    }
+
+    static var cleanupStyleMode: CleanupStyleMode {
+        CleanupStyleMode(rawValue: UserDefaults.standard.string(forKey: cleanupStyle) ?? "") ?? .auto
+    }
 
     static func bool(_ key: String) -> Bool { UserDefaults.standard.bool(forKey: key) }
 
@@ -160,9 +175,22 @@ final class QuillApp: NSObject, NSApplicationDelegate {
     private var holdCommitted = false
     /// This session should run Grok cleanup after STT (smart key).
     private var sessionUsesCleanup = false
+    /// Resolved at stop from the style menu + dictation length (Auto mode).
+    private var sessionCleanupStyle: Cleaner.Style = .light
+    /// Auto mode: dictations at least this long get the detailed editor.
+    private static let detailedCleanupThresholdSeconds: TimeInterval = 10
     private var pendingPCM: [Data] = []
     private var socketReady = false
     private var sawAnyText = false
+    /// Everything sent to STT this session, kept so a dead connection can be
+    /// replayed once instead of losing the sentence ("Heard you, but no
+    /// transcript came back"). Capped; overflow disables rescue for the session.
+    private var rescuePCM: [Data] = []
+    private var rescuePCMBytes = 0
+    private var rescueOverflowed = false
+    private var sttRescueUsed = false
+    /// ~60s of 48kHz mono 16-bit PCM — far beyond the 10s window rescue targets.
+    private static let rescuePCMCap = 6 * 1024 * 1024
     private var stopReason: StopReason = .hotkey
     private var didRunVoiceCommand = false
     private var finaliseStartedAt: Date?
@@ -527,6 +555,32 @@ final class QuillApp: NSObject, NSApplicationDelegate {
             + "and the field is Accessibility-writable. Toggle anytime for A/B."
         cleanupMenu.addItem(eagerItem)
         cleanupMenu.addItem(.separator())
+        let styleHeader = NSMenuItem(title: "Cleanup style", action: nil, keyEquivalent: "")
+        styleHeader.isEnabled = false
+        cleanupMenu.addItem(styleHeader)
+        let styleOptions: [(Defaults.CleanupStyleMode, String, String)] = [
+            (.light, "Light — punctuation and typos only",
+             "Fixes punctuation, capitalisation, and obvious typos. "
+                + "Never rewords or restructures what you said."),
+            (.auto, "Detailed for long dictations (10s+)",
+             "Short dictations stay light. Anything you speak for 10 seconds or "
+                + "more gets the detailed editor: word order, false starts, and "
+                + "run-ons fixed so it reads as written English."),
+            (.detailed, "Always detailed",
+             "Every smart dictation gets the full grammar edit. Content, order, "
+                + "and tone are preserved; phrasing is polished."),
+        ]
+        for (mode, title, tip) in styleOptions {
+            let item = NSMenuItem(title: title,
+                                  action: #selector(setCleanupStyle(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = mode.rawValue
+            item.state = Defaults.cleanupStyleMode == mode ? .on : .off
+            item.isEnabled = Defaults.cleanupIsOn
+            item.toolTip = tip
+            cleanupMenu.addItem(item)
+        }
+        cleanupMenu.addItem(.separator())
         let smartKeyHeader = NSMenuItem(title: "Smart key (Grok cleanup)", action: nil, keyEquivalent: "")
         smartKeyHeader.isEnabled = false
         cleanupMenu.addItem(smartKeyHeader)
@@ -843,6 +897,22 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         hud.apply(.notice(on
             ? "Raw pastes first — Grok polish swaps in when safe"
             : "Cleaned dictation waits for Grok before pasting"))
+        hud.collapse(after: 2.5)
+    }
+
+    @objc private func setCleanupStyle(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String,
+              let mode = Defaults.CleanupStyleMode(rawValue: raw) else { return }
+        UserDefaults.standard.set(mode.rawValue, forKey: Defaults.cleanupStyle)
+        Log.write("cleanup style set to \(mode.rawValue)")
+        buildStatusItem()
+        let notice: String
+        switch mode {
+        case .light:    notice = "Light cleanup — punctuation and typos only"
+        case .auto:     notice = "Detailed cleanup for dictations of 10s or longer"
+        case .detailed: notice = "Detailed cleanup for every smart dictation"
+        }
+        hud.apply(.notice(notice))
         hud.collapse(after: 2.5)
     }
 
@@ -1193,74 +1263,22 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         pendingPCM = []
         socketReady = false
         sawAnyText = false
+        rescuePCM = []
+        rescuePCMBytes = 0
+        rescueOverflowed = false
+        sttRescueUsed = false
         speculative = nil
         specSnapshot = nil
         stopReason = sessionFromHold ? .hold : .hotkey
         didRunVoiceCommand = false
         lastStopCandidate = nil
 
-        client.onReady = { [weak self] in
-            guard let self else { return }
-            self.socketReady = true
-            for chunk in self.pendingPCM { client.send(pcm: chunk) }
-            self.pendingPCM = []
-        }
-        client.onText = { [weak self] text in
-            guard let self, !text.isEmpty else { return }
-            self.sawAnyText = true
-
-            if !self.didRunVoiceCommand, VoiceCommands.containsOpenGrok(text) {
-                self.didRunVoiceCommand = true
-                self.runOpenGrok()
-            }
-
-            self.considerVoiceStop(after: text)
-            // Hold-to-talk: release is the stop — skip auto-finish pause watch signals.
-            // Only NEW words count as activity (unchanged partials re-fire constantly).
-            if !self.sessionFromHold, text != self.lastActivityText {
-                self.lastActivityText = text
-                self.noteVoiceActivity()
-            }
-
-            // Show what will actually be inserted, command phrases already removed.
-            let preview = VoiceCommands.stripAll(text)
-            self.hud.update(text: self.sessionUsesCleanup ? "✦ \(preview)" : preview)
-        }
-        let sessionGeneration = polishGeneration
-        client.onComplete = { [weak self] text in
-            self?.finishSession(with: text, generation: sessionGeneration)
-        }
-        client.onFailure = { [weak self] failure in
-            guard let self, sessionGeneration == self.polishGeneration else { return }
-            self.abortSession(message: failure.message)
-        }
-
-        // Term hints are part of the cleanup path only. On the raw key the user
-        // wants exactly what was said, with nothing biasing the recogniser —
-        // hinting there pulled ordinary words onto dictionary terms.
-        let useKeyterms = sessionUsesCleanup && Defaults.bool(Defaults.sttKeyterms)
-        client.connect(token: creds.token,
-                       language: UserDefaults.standard.string(forKey: Defaults.language) ?? "en",
-                       keyterms: useKeyterms ? Vocabulary.keyterms() : [])
+        wireSTT(client: client, token: creds.token, replay: [])
 
         if sessionUsesCleanup {
             // Pay for the cleanup TLS handshake now, while the user is still
             // speaking, instead of after the transcript lands.
             Cleaner.warm(token: creds.token)
-        }
-
-        // Hops to main because this fires on the audio render thread, where
-        // `socketReady` and `pendingPCM` would otherwise be read and mutated
-        // concurrently with the main-queue flush in `onReady` — an unsynchronised
-        // Array mutation, and exactly at socket-open time. The main queue is
-        // serial and FIFO, so chunk order is preserved; it also keeps the
-        // websocket send off the render thread.
-        recorder.onPCM = { [weak self] data in
-            DispatchQueue.main.async {
-                guard let self else { return }
-                if self.socketReady { client.send(pcm: data) }
-                else if self.pendingPCM.count < 200 { self.pendingPCM.append(data) }
-            }
         }
         recorder.onLevel = { [weak self] level in
             DispatchQueue.main.async {
@@ -1290,6 +1308,126 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         }
 
         enterRecordingState()
+    }
+
+    /// Wire an STT client into the live session and connect it. Shared by the
+    /// session start and the mid-session rescue reconnect; `replay` is PCM
+    /// already captured this session, sent ahead of anything queued so the
+    /// server hears the audio in order.
+    private func wireSTT(client: STTClient, token: String, replay: [Data]) {
+        client.onReady = { [weak self] in
+            guard let self, self.stt === client else { return }
+            self.socketReady = true
+            for chunk in replay { client.send(pcm: chunk) }
+            for chunk in self.pendingPCM { client.send(pcm: chunk) }
+            self.pendingPCM = []
+        }
+        client.onText = { [weak self] text in
+            guard let self, self.stt === client, !text.isEmpty else { return }
+            self.sawAnyText = true
+
+            if !self.didRunVoiceCommand, VoiceCommands.containsOpenGrok(text) {
+                self.didRunVoiceCommand = true
+                self.runOpenGrok()
+            }
+
+            self.considerVoiceStop(after: text)
+            // Hold-to-talk: release is the stop — skip auto-finish pause watch signals.
+            // Only NEW words count as activity (unchanged partials re-fire constantly).
+            if !self.sessionFromHold, text != self.lastActivityText {
+                self.lastActivityText = text
+                self.noteVoiceActivity()
+            }
+
+            // Show what will actually be inserted, command phrases already removed.
+            let preview = VoiceCommands.stripAll(text)
+            self.hud.update(text: self.sessionUsesCleanup ? "✦ \(preview)" : preview)
+        }
+        let sessionGeneration = polishGeneration
+        client.onComplete = { [weak self] text in
+            guard let self, self.stt === client else { return }
+            self.finishSession(with: text, generation: sessionGeneration)
+        }
+        client.onFailure = { [weak self] failure in
+            guard let self, self.stt === client,
+                  sessionGeneration == self.polishGeneration else { return }
+            self.abortSession(message: failure.message)
+        }
+
+        // Term hints are part of the cleanup path only. On the raw key the user
+        // wants exactly what was said, with nothing biasing the recogniser —
+        // hinting there pulled ordinary words onto dictionary terms.
+        let useKeyterms = sessionUsesCleanup && Defaults.bool(Defaults.sttKeyterms)
+        client.connect(token: token,
+                       language: UserDefaults.standard.string(forKey: Defaults.language) ?? "en",
+                       keyterms: useKeyterms ? Vocabulary.keyterms() : [])
+
+        // Hops to main because this fires on the audio render thread, where
+        // `socketReady` and `pendingPCM` would otherwise be read and mutated
+        // concurrently with the main-queue flush in `onReady` — an unsynchronised
+        // Array mutation, and exactly at socket-open time. The main queue is
+        // serial and FIFO, so chunk order is preserved; it also keeps the
+        // websocket send off the render thread.
+        recorder.onPCM = { [weak self] data in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.bufferRescuePCM(data)
+                if self.socketReady { client.send(pcm: data) }
+                else if self.pendingPCM.count < 200 { self.pendingPCM.append(data) }
+            }
+        }
+    }
+
+    /// Frees the replay buffer (up to ~6MB) once the session can no longer
+    /// need a rescue.
+    private func clearRescueBuffer() {
+        rescuePCM = []
+        rescuePCMBytes = 0
+    }
+
+    /// Main queue only. Keeps the session's PCM replayable for `attemptSTTRescue`.
+    private func bufferRescuePCM(_ data: Data) {
+        guard !rescueOverflowed else { return }
+        rescuePCMBytes += data.count
+        guard rescuePCMBytes <= Self.rescuePCMCap else {
+            rescuePCM = []
+            rescueOverflowed = true
+            return
+        }
+        rescuePCM.append(data)
+    }
+
+    /// One-shot mid-session reconnect. Audio is flowing and the socket opened,
+    /// but the server has said nothing for 10s — previously this aborted with
+    /// "Heard you, but no transcript came back" and the sentence was lost.
+    /// The PCM is still in memory, so reconnect and replay it instead.
+    private func attemptSTTRescue() -> Bool {
+        guard !sttRescueUsed, !rescueOverflowed, !rescuePCM.isEmpty else { return false }
+        // Only rescue the server-silent case; mic and network failures have
+        // their own diagnosis and a reconnect would not help.
+        guard socketReady, recorder.framesCaptured > 0,
+              recorder.peakLevel >= 0.004 else { return false }
+        guard let creds = Auth.load() else { return false }
+        sttRescueUsed = true
+        let replay = rescuePCM
+        Log.write("stt rescue — no transcript after 10s; reconnecting and replaying "
+            + "\(replay.count) chunk(s), \(rescuePCMBytes / 1024)KB")
+        hud.flashTarget("reconnecting speech-to-text…", for: 2)
+        stt?.cancel()
+        let client = STTClient()
+        stt = client
+        socketReady = false
+        pendingPCM = []
+        wireSTT(client: client, token: creds.token, replay: replay)
+
+        // The fresh connection gets its own 10s window before giving up for real.
+        silenceTimer?.invalidate()
+        silenceTimer = Timer.scheduledTimer(withTimeInterval: 10, repeats: false) { [weak self] _ in
+            guard let self, self.isRecording, !self.sawAnyText else { return }
+            self.logAudioState()
+            self.abortSession(message: self.diagnosis())
+        }
+        return true
     }
 
     private func enterRecordingState() {
@@ -1344,6 +1482,7 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         silenceTimer = Timer.scheduledTimer(withTimeInterval: 10, repeats: false) { [weak self] _ in
             guard let self, self.isRecording, !self.sawAnyText else { return }
             self.logAudioState()
+            if self.attemptSTTRescue() { return }
             self.abortSession(message: self.diagnosis())
         }
         maxDurationTimer = Timer.scheduledTimer(withTimeInterval: 300, repeats: false) { [weak self] _ in
@@ -1461,6 +1600,7 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         // which would make a legitimate in-flight transcript look superseded.
         speculative = nil
         specSnapshot = nil
+        clearRescueBuffer()
         // Pending arm (mic auth not finished yet): clear flags so the auth
         // callback will not start a ghost capture.
         if !isRecording {
@@ -1571,12 +1711,27 @@ final class QuillApp: NSObject, NSApplicationDelegate {
             case .hotkey: return "hotkey/pill"
             }
         }()
-        Log.write("stop (\(reasonLabel)) — finalising, sawText=\(sawAnyText) cleanup=\(sessionUsesCleanup)")
+        sessionCleanupStyle = resolvedCleanupStyle()
+        Log.write("stop (\(reasonLabel)) — finalising, sawText=\(sawAnyText) cleanup=\(sessionUsesCleanup)"
+            + (sessionUsesCleanup ? " style=\(sessionCleanupStyle.rawValue)" : ""))
         finaliseStartedAt = Date()
         logAudioState()
         hud.apply(.thinking)
         if sessionUsesCleanup, Defaults.speculativeCleanupIsOn { startSpeculativeCleanup() }
         stt?.finish()
+    }
+
+    /// Style menu → this session's editing depth. In Auto, long-form dictation
+    /// (10s+) gets the detailed editor: that is where spoken phrasing piles up,
+    /// and where an extra beat of cleanup latency is invisible anyway.
+    private func resolvedCleanupStyle() -> Cleaner.Style {
+        switch Defaults.cleanupStyleMode {
+        case .light: return .light
+        case .detailed: return .detailed
+        case .auto:
+            let seconds = startedAt.map { Date().timeIntervalSince($0) } ?? 0
+            return seconds >= Self.detailedCleanupThresholdSeconds ? .detailed : .light
+        }
     }
 
     /// Send the cleanup request now, on the transcript as it stands, so Grok
@@ -1586,19 +1741,17 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         let snapshot = VoiceCommands.stripAll(stt?.transcript ?? "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !snapshot.isEmpty else { return }
-        // Already-clean text takes the local fast-path in finishSession —
-        // a speculative request for it would be pure waste.
-        guard !Cleaner.alreadyClean(snapshot) else { return }
+        // Fire even when the partial already looks clean: partials lag speech,
+        // and a clean-looking fragment regularly grows into a final that needs
+        // the full cleanup — skipping here forced the serial round-trip on
+        // exactly the longest dictations. If the final really is clean it takes
+        // the local fast-path and the request is one cheap discard.
         specSnapshot = snapshot
 
-        let history = SpeculationGovernor.history()
-        guard SpeculationGovernor.shouldSpeculate(history: history) else {
-            Log.write("cleanup speculative paused — \(SpeculationGovernor.describe(history))")
-            return
-        }
         guard let creds = Auth.load() else { return }
         speculative = SpeculativeCleanup(input: snapshot,
                                          token: creds.token,
+                                         style: sessionCleanupStyle,
                                          context: cleanupContext())
         Log.write("cleanup speculative fired for \(snapshot.count) chars")
     }
@@ -1624,6 +1777,7 @@ final class QuillApp: NSObject, NSApplicationDelegate {
             return
         }
         stt = nil
+        clearRescueBuffer()
         let enteredAt = Date()
         finishEnteredAt = enteredAt
         cleanupSeconds = 0
@@ -1681,8 +1835,10 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         if wantsCleanup, let creds = Auth.load() {
             laneLabel = "smart"
             // Already formatted and structurally trivial: the corrector would be
-            // a no-op, so skip the round-trip and insert as spoken.
-            if Cleaner.alreadyClean(trimmed) {
+            // a no-op, so skip the round-trip and insert as spoken. Detailed
+            // style always goes to the model — "clean" formatting says nothing
+            // about spoken-phrasing grammar.
+            if sessionCleanupStyle == .light, Cleaner.alreadyClean(trimmed) {
                 specSnapshot = nil
                 speculativeLabel = "local"
                 Log.write("cleanup local fast-path — already clean (\(trimmed.count) chars)")
@@ -1697,9 +1853,13 @@ final class QuillApp: NSObject, NSApplicationDelegate {
             }
             specSnapshot = nil
 
-            let hit = spec?.matches(final: trimmed) ?? false
+            // A speculative result only counts when it was produced with the
+            // same editing depth this session resolved to.
+            let hit = spec.map { $0.style == sessionCleanupStyle && $0.matches(final: trimmed) } ?? false
+            // No request in flight can only mean there was no partial at stop
+            // (speculation itself never pauses any more).
             if Defaults.speculativeCleanupIsOn, spec == nil {
-                speculativeLabel = "paused"
+                speculativeLabel = "none"
             } else if hit {
                 speculativeLabel = "hit"
             } else if spec != nil {
@@ -1731,7 +1891,8 @@ final class QuillApp: NSObject, NSApplicationDelegate {
                         completion(outcome)
                     }
                 } else {
-                    Cleaner.clean(trimmed, token: creds.token, context: context,
+                    Cleaner.clean(trimmed, token: creds.token,
+                                  style: sessionCleanupStyle, context: context,
                                   completion: completion)
                 }
             }
@@ -1766,12 +1927,16 @@ final class QuillApp: NSObject, NSApplicationDelegate {
             // A speculative request has been running since stop, so only what is
             // left of its budget may still be waited on.
             var cleanupBudget = Cleaner.budgetSeconds(for: trimmed)
+            // Mirror Cleaner's detailed-budget extension or the fallback timer
+            // below would cut the request off before its own deadline.
+            if sessionCleanupStyle == .detailed { cleanupBudget = min(cleanupBudget * 1.5, 10) }
             if hit, let spec {
                 cleanupBudget = max(0.15, cleanupBudget - Date().timeIntervalSince(spec.startedAt))
             }
             let budgetLabel = String(format: "%.1f", cleanupBudget)
-            var flash = "cleaning with Grok… (≤\(budgetLabel)s)"
-            if vocabN > 0 { flash = "cleaning with Grok… (\(vocabN) terms, ≤\(budgetLabel)s)" }
+            let verb = sessionCleanupStyle == .detailed ? "detailed cleanup" : "cleaning"
+            var flash = "\(verb) with Grok… (≤\(budgetLabel)s)"
+            if vocabN > 0 { flash = "\(verb) with Grok… (\(vocabN) terms, ≤\(budgetLabel)s)" }
             if context != nil { flash += " · context" }
             hud.flashTarget(flash, for: cleanupBudget + 0.5)
             hud.update(text: trimmed)
@@ -1782,7 +1947,11 @@ final class QuillApp: NSObject, NSApplicationDelegate {
                 self.cleanupSeconds = Date().timeIntervalSince(enteredAt)
                 switch outcome {
                 case .cleaned(let polished):
-                    Vocabulary.learnFromCleanup(raw: trimmed, cleaned: polished)
+                    // Detailed edits reword — pairing their words with the raw
+                    // transcript would teach rewordings as "mishearings".
+                    if self.sessionCleanupStyle == .light {
+                        Vocabulary.learnFromCleanup(raw: trimmed, cleaned: polished)
+                    }
                     self.deliverInsert(polished, notedCleanup: true, circleImages: circleImages)
                 case .failed(let message):
                     Log.write("cleanup failed — using raw: \(message)")
@@ -1821,7 +1990,9 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         if Inserter.polishInPlace(replacing: raw, with: polished) {
             let ms = Int((Date().timeIntervalSince(startedAt) * 1000).rounded())
             Log.write("polish swapped in place +\(ms)ms after final")
-            Vocabulary.learnFromCleanup(raw: raw, cleaned: polished)
+            if sessionCleanupStyle == .light {
+                Vocabulary.learnFromCleanup(raw: raw, cleaned: polished)
+            }
             hud.flashTarget("✦ polished", for: 1.2)
             hud.update(text: polished)
             armEditWatch(afterInserting: polished)
@@ -1921,7 +2092,7 @@ final class QuillApp: NSObject, NSApplicationDelegate {
                 case .hotkey, .voice: return .other
                 }
             }(),
-            circleCaptureEnabled: Defaults.circleCaptureIsOn,
+            sessionHasCaptures: !circleImages.isEmpty,
             deliveringCircleImages: false
         )
 
@@ -1976,7 +2147,7 @@ final class QuillApp: NSObject, NSApplicationDelegate {
                 case .hotkey, .voice: return .other
                 }
             }(),
-            circleCaptureEnabled: Defaults.circleCaptureIsOn,
+            sessionHasCaptures: true,
             deliveringCircleImages: true
         )
 
@@ -2073,6 +2244,7 @@ final class QuillApp: NSObject, NSApplicationDelegate {
     private func abortSession(message: String) {
         Log.write("aborted — \(message)")
         invalidatePendingPolish()
+        clearRescueBuffer()
         isRecording = false
         sessionFromHold = false
         sessionUsesCleanup = false
@@ -2169,13 +2341,18 @@ final class PostInsertEditWatch {
 
         // Let paste settle, then snapshot the field.
         DispatchQueue.main.asyncAfter(deadline: .now() + settleDelay) { [weak self] in
-            self?.snapshotAndArm(retryAfterAXNudge: true)
+            self?.snapshotAndArm(retriesLeft: PostInsertEditWatch.snapshotRetryDelays.count)
         }
     }
 
+    /// Electron apps build their AX tree lazily after the AXManualAccessibility
+    /// nudge — one 0.45s retry lost ~44 of ~320 sessions' worth of corrections
+    /// in real logs, so give the tree up to ~3s to appear before giving up.
+    private static let snapshotRetryDelays: [TimeInterval] = [0.45, 0.9, 1.6]
+
     /// First read failing may just mean an Electron app hasn't built its AX
-    /// tree yet — nudge it awake once and retry before giving up.
-    private func snapshotAndArm(retryAfterAXNudge: Bool) {
+    /// tree yet — nudge it awake and retry with patience before giving up.
+    private func snapshotAndArm(retriesLeft: Int) {
         guard !original.isEmpty else { return }
         // Two arming closures can be in flight at once (eager insert arms for
         // the raw text, the polish swap arms again). Without this the earlier
@@ -2184,11 +2361,18 @@ final class PostInsertEditWatch {
         timer?.invalidate()
         timer = nil
         guard let snapshot = Inserter.focusedFieldValue(), !snapshot.isEmpty else {
-            if retryAfterAXNudge, Inserter.encourageAXExposure() {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { [weak self] in
-                    self?.snapshotAndArm(retryAfterAXNudge: false)
+            let delays = PostInsertEditWatch.snapshotRetryDelays
+            if retriesLeft > 0 {
+                // Nudge only on the first failure; later retries just wait
+                // for the tree the nudge already requested.
+                let isFirstFailure = retriesLeft == delays.count
+                if !isFirstFailure || Inserter.encourageAXExposure() {
+                    let delay = delays[delays.count - retriesLeft]
+                    DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                        self?.snapshotAndArm(retriesLeft: retriesLeft - 1)
+                    }
+                    return
                 }
-                return
             }
             Log.write("vocab: edit-watch skipped — field not readable via Accessibility")
             cancel()

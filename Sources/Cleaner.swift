@@ -14,8 +14,16 @@ import FoundationNetworking
 /// user is still speaking so cleanup feels ~1s instead of ~2s.
 enum Cleaner {
 
-    /// Original fast cleanup model (snappier than 4.20 in practice for this path).
-    private static let model = "grok-4-1-fast-non-reasoning"
+    /// Explicit 4.3 — the retired `grok-4-1-fast-non-reasoning` slug already
+    /// redirected here with `none` effort (xAI, 15 May 2026). Naming it keeps
+    /// logs honest and lets detailed cleanup raise effort without changing models.
+    private static let model = "grok-4.3"
+
+    /// Light / short: no thinking (same as the old 4.1-fast-non-reasoning redirect).
+    /// Detailed / long-form: `low` — a few extra seconds of edit quality.
+    private static func reasoningEffort(for style: Style) -> String {
+        style == .detailed ? "low" : "none"
+    }
 
     /// QUILL_CHAT_URL points this at a mock server for headless benchmarking.
     private static let endpoint: URL = {
@@ -27,6 +35,8 @@ enum Cleaner {
     /// rants get more headroom (model output time scales with transcript length).
     private static let minTimeout: TimeInterval = 1.5
     private static let maxTimeout: TimeInterval = 8.0
+    /// Detailed / `low` reasoning may need a few extra seconds beyond the light cap.
+    private static let detailedMaxTimeout: TimeInterval = 12.0
     /// Roughly +1s of budget per this many characters of transcript.
     private static let charsPerExtraSecond: Double = 350
 
@@ -35,7 +45,7 @@ enum Cleaner {
     /// Scales with transcript length so a 2–3 minute smart dictation is not
     /// cut off at 1.5s, while short “clean this sentence” stays fast.
     /// Examples (approx): 50 chars → 1.6s · 800 chars (~1 min) → 3.8s ·
-    /// 2000 chars (~2.5 min) → 7.2s · longer → capped at 8s.
+    /// 2000 chars (~2.5 min) → 7.2s · longer → capped at 8s (12s detailed).
     static func budgetSeconds(for text: String) -> TimeInterval {
         let n = max(text.trimmingCharacters(in: .whitespacesAndNewlines).count, 1)
         let scaled = minTimeout + Double(n) / charsPerExtraSecond
@@ -46,7 +56,7 @@ enum Cleaner {
     private static let session: URLSession = {
         let config = URLSessionConfiguration.default
         // Per-request timeout is set from budgetSeconds; this is the outer ceiling.
-        config.timeoutIntervalForRequest = maxTimeout + 1
+        config.timeoutIntervalForRequest = detailedMaxTimeout + 1
         config.waitsForConnectivity = false
         return URLSession(configuration: config)
     }()
@@ -168,6 +178,7 @@ enum Cleaner {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try? JSONSerialization.data(withJSONObject: [
             "model": model,
+            "reasoning_effort": "none",
             "max_tokens": 1,
             "temperature": 0,
             "messages": [["role": "user", "content": "hi"]],
@@ -222,19 +233,22 @@ enum Cleaner {
         let userContent = wrapTranscript(trimmed)
         let original = trimmed
 
-        // Detailed edits generate more tokens; give them a little more room.
+        // Detailed edits generate more tokens and `low` reasoning needs a beat.
         var budget = budgetSeconds(for: original)
-        if style == .detailed { budget = min(budget * 1.5, 10) }
-        let styleNote = style == .detailed ? " style=detailed" : ""
+        if style == .detailed { budget = min(budget * 1.5, detailedMaxTimeout) }
+        let effort = reasoningEffort(for: style)
+        let styleNote = style == .detailed ? " style=detailed effort=\(effort)" : " effort=\(effort)"
         let contextNote = contextBlock == nil
             ? "context=off"
             : "context=on (\(context?.logSummary ?? ""))"
-        Log.write("cleanup budget \(String(format: "%.1f", budget))s for \(original.count) chars\(styleNote) \(contextNote)")
+        Log.write("cleanup budget \(String(format: "%.1f", budget))s for \(original.count) chars"
+            + " model=\(model)\(styleNote) \(contextNote)")
 
         let started = Date()
         DispatchQueue.global(qos: .userInitiated).async {
             switch request(text: original, userContent: userContent,
-                           token: token, model: model, system: system, budget: budget) {
+                           token: token, model: model, effort: effort,
+                           system: system, budget: budget) {
             case .cleaned(let out):
                 // One shot: if it rewrites too hard, paste raw — no second model.
                 guard resembles(original: original, candidate: out, style: style) else {
@@ -251,17 +265,19 @@ enum Cleaner {
                 DispatchQueue.main.async { completion(.cleaned(out)) }
             case .failed(let message):
                 let ms = Int(Date().timeIntervalSince(started) * 1000)
-                Log.write("cleanup fail model=\(model) \(ms)ms: \(message) \(contextNote)")
+                Log.write("cleanup fail model=\(model) \(ms)ms: \(message)\(styleNote) \(contextNote)")
                 DispatchQueue.main.async { completion(.failed(message)) }
             }
         }
     }
 
     private static func request(text original: String, userContent: String,
-                                token: String, model: String, system: String,
+                                token: String, model: String, effort: String,
+                                system: String,
                                 budget: TimeInterval) -> Outcome {
         let body: [String: Any] = [
             "model": model,
+            "reasoning_effort": effort,
             "temperature": 0,
             "max_tokens": min(max(original.count * 2, 64), 2048),
             "messages": [

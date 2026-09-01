@@ -1929,7 +1929,7 @@ final class QuillApp: NSObject, NSApplicationDelegate {
             var cleanupBudget = Cleaner.budgetSeconds(for: trimmed)
             // Mirror Cleaner's detailed-budget extension or the fallback timer
             // below would cut the request off before its own deadline.
-            if sessionCleanupStyle == .detailed { cleanupBudget = min(cleanupBudget * 1.5, 10) }
+            if sessionCleanupStyle == .detailed { cleanupBudget = min(cleanupBudget * 1.5, 12) }
             if hit, let spec {
                 cleanupBudget = max(0.15, cleanupBudget - Date().timeIntervalSince(spec.startedAt))
             }

@@ -5,7 +5,7 @@
 > **This repository** ([diliprt/quill](https://github.com/diliprt/quill)) is a public fork of
 > [xfreeze2/quill](https://github.com/xfreeze2/quill). Upstream behaviour is preserved; this
 > fork adds hold-to-talk, dual-key Grok cleanup, and a local personal dictionary.
-> Current fork build: **0.8.9**.
+> Current fork build: **0.8.10**.
 
 Tap a key, talk, then click into whatever window you want the words in. They appear there — at
 the end of what's already written, without touching your clipboard.
@@ -53,8 +53,7 @@ Mic + listening HUD arm on **key-down**; the delay only decides commit vs discar
 
 | Setting | Choice | Why |
 |---------|--------|-----|
-| **Cleanup model** | `grok-4-1-fast-non-reasoning` | Felt **faster and cleaner** in real use than `grok-4.20-0309-non-reasoning`. |
-| **Hard timeout** | **Length-scaled 1.5–8s → paste raw** (P1) | Short phrases stay snappy; long rants get more headroom. |
+| **Cleanup model** | `grok-4.3` | Explicit pin (retired `grok-4-1-fast-*` slugs already redirected here). Light = `reasoning_effort=none`; detailed / 10s+ = `low`. |
 | **Keep-warm pings** | **Off** (disabled) | Background / periodic warm-ups removed; test without extra API noise. |
 | **Model fallbacks** | **Single model only** | No multi-model retry chain (retries added latency). |
 | **Prompt style** | Light corrector | Grammar / caps / punctuation / obvious typos — not full rephrase. |

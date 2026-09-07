@@ -13,3 +13,6 @@ signing/quill.p12
 
 # Release artifacts
 dist/
+
+# Machine-specific agent notes — keep local, never publish.
+CONTEXT.md

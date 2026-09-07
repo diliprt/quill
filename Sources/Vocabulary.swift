@@ -313,7 +313,6 @@ enum Vocabulary {
         ("Postgres", ["PostgreSQL", "post gress"]),
         ("Tailwind", ["tail wind", "Tailwind CSS"]),
 
-        //         ("Example Product", ["Signara Ward", "Synara Ward", "Signa Ward"]),
         ("Ghostty", ["Ghosty", "Ghost tee", "ghosty"]),
         ("Accessibility", ["access ability"]),
     ]
@@ -678,7 +677,7 @@ enum Vocabulary {
         guard !isCommonWord(a), !isQuantityToken(a) else { return false }
         guard !aliasStoplist.contains(a.lowercased()) else { return false }
         // An alias longer than the term it maps to is a phrase, not a mishearing
-        // ("Philippe" ← "Alexandra Chen").
+        // ("Alex" ← "Alexandra Chen").
         guard a.count <= term.count + 4 else { return false }
         // Case-only variants ("gitlab" for "GitLab") are always fine; anything
         // else has to actually sound like the term.
@@ -698,8 +697,7 @@ enum Vocabulary {
         guard pinned || !isQuantityToken(t) else { return false }
 
         // An alias must not itself be a canonical term in the library:
-        // that is how self-fighting clusters formed ("Origin" ↔ "Origin Arc",
-        // name variants aliasing each other).
+        // that is how self-fighting clusters formed ("Origin" ↔ "Origin Arc").
         func aliasIsCanonical(_ a: String, in entries: [Entry]) -> Bool {
             entries.contains { $0.term.caseInsensitiveCompare(a) == .orderedSame }
         }
@@ -766,7 +764,7 @@ enum Vocabulary {
             found.append(t)
         }
 
-        // 1) CamelCase / PascalCase product names (SignaraApp, SpaceXAI)
+        // 1) CamelCase / PascalCase product names (AcmeApp, SpaceXAI)
         let camel = try! NSRegularExpression(pattern: #"\b[A-Z][a-z0-9]*(?:[A-Z][a-z0-9]+)+\b"#)
         for m in camel.matches(in: text, range: NSRange(text.startIndex..., in: text)) {
             if let r = Range(m.range, in: text) { keep(String(text[r])) }

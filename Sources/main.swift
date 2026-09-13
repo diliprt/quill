@@ -46,6 +46,9 @@ enum Defaults {
     static let circleCapture = "circleCapture"
     /// Send personal-dictionary terms to the recogniser as `keyterm` biases.
     static let sttKeyterms = "sttKeyterms"
+    /// Start-sound choice: `off` or an `NSSound` name (`Tink`, `Pop`, …).
+    /// 0.8.11 stored a bool here; `startCue` still reads that.
+    static let startSound = "startSound"
 
     static func register() {
         UserDefaults.standard.register(defaults: [
@@ -73,7 +76,19 @@ enum Defaults {
             keepHistory: true,
             circleCapture: false,
             sttKeyterms: true,
+            startSound: SessionSounds.StartCue.tink.rawValue,
         ])
+    }
+
+    static var startCue: SessionSounds.StartCue {
+        let raw = UserDefaults.standard.object(forKey: startSound)
+        if let name = raw as? String, let cue = SessionSounds.StartCue(rawValue: name) {
+            return cue
+        }
+        if let on = raw as? Bool {
+            return on ? .tink : .off
+        }
+        return .tink
     }
 
     static var circleCaptureIsOn: Bool { bool(circleCapture) }
@@ -416,10 +431,13 @@ final class QuillApp: NSObject, NSApplicationDelegate {
     // MARK: Status item
 
     private func buildStatusItem() {
-        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        // Reuse the existing item. Creating a second one from a menu action
+        // (start sound, cleanup style, …) orphans the first and the waveform
+        // often disappears from a crowded menu bar until relaunch.
+        if statusItem == nil {
+            statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        }
         guard let button = statusItem.button else { return }
-        button.image = NSImage(systemSymbolName: "waveform", accessibilityDescription: "Quill")
-        button.image?.isTemplate = true
         button.target = self
         button.action = #selector(statusItemClicked)
         button.sendAction(on: [.leftMouseUp, .rightMouseUp])
@@ -428,6 +446,7 @@ final class QuillApp: NSObject, NSApplicationDelegate {
             tip += " · \(Defaults.smartTrigger.gesture(mode: Defaults.currentGesture)) for cleaned"
         }
         button.toolTip = tip
+        refreshIcon()
     }
 
     @objc private func statusItemClicked() {
@@ -686,6 +705,25 @@ final class QuillApp: NSObject, NSApplicationDelegate {
             action: nil, keyEquivalent: "")
         menu.addItem(vocabItem)
         menu.setSubmenu(vocabMenu, for: vocabItem)
+
+        menu.addItem(.separator())
+        let startSoundMenu = NSMenu()
+        startSoundMenu.autoenablesItems = false
+        for cue in SessionSounds.StartCue.allCases {
+            if cue == .tink {
+                startSoundMenu.addItem(.separator())
+            }
+            let item = NSMenuItem(title: cue.menuTitle,
+                                  action: #selector(setStartSound(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = cue.rawValue
+            item.state = Defaults.startCue == cue ? .on : .off
+            startSoundMenu.addItem(item)
+        }
+        let startSoundItem = NSMenuItem(title: "Start sound", action: nil, keyEquivalent: "")
+        menu.addItem(startSoundItem)
+        menu.setSubmenu(startSoundMenu, for: startSoundItem)
+        menu.addItem(.separator())
 
         let appearanceMenu = NSMenu()
         appearanceMenu.autoenablesItems = false
@@ -1042,6 +1080,21 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         hud.resetPosition()
     }
 
+    @objc private func setStartSound(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String,
+              let cue = SessionSounds.StartCue(rawValue: raw) else { return }
+        UserDefaults.standard.set(cue.rawValue, forKey: Defaults.startSound)
+        Log.write("start sound \(cue.rawValue)")
+        buildStatusItem()
+        if cue == .off {
+            hud.apply(.notice("Start sound off"))
+        } else {
+            SessionSounds.play(cue)
+            hud.apply(.notice("Start sound — \(cue.menuTitle)"))
+        }
+        hud.collapse(after: 2.0)
+    }
+
     @objc private func toggleCornerButton() {
         Defaults.flip(Defaults.cornerButton)
         let showing = Defaults.bool(Defaults.cornerButton)
@@ -1188,6 +1241,9 @@ final class QuillApp: NSObject, NSApplicationDelegate {
 
     private func startSession(fromHold: Bool = false, cleanup: Bool = false) {
         guard !isRecording else { return }
+        if selfTestPath == nil {
+            SessionSounds.playStart()
+        }
         invalidatePendingPolish()
         speculative = nil
         specSnapshot = nil

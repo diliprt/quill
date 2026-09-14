@@ -20,7 +20,7 @@ Transcription uses **your existing Grok subscription**. No extra API key. Nothin
 The dictionary is a closed loop. Each session can teach the next one, on this Mac only.
 
 <p align="center">
-  <img src="docs/learning-loop.svg" alt="Speak, transcribe, clean or edit, remember — then the next session uses those terms" width="920">
+  <img src="docs/learning-loop.png" alt="Speak, transcribe, clean or edit, remember — then the next session uses those terms" width="920">
 </p>
 
 1. **Speak** — hold the smart key (or the simple key for raw STT).

@@ -1089,7 +1089,7 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         if cue == .off {
             hud.apply(.notice("Start sound off"))
         } else {
-            SessionSounds.play(cue)
+            SessionSounds.preview(cue)
             hud.apply(.notice("Start sound — \(cue.menuTitle)"))
         }
         hud.collapse(after: 2.0)

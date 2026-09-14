@@ -31,12 +31,32 @@ enum SessionSounds {
         }
     }
 
+    /// Must be retained — `NSSound` stops if the instance is released mid-play.
+    private static var current: NSSound?
+
     static func playStart() {
         play(Defaults.startCue)
     }
 
     static func play(_ cue: StartCue) {
+        current?.stop()
+        current = nil
         guard let name = cue.systemName else { return }
-        NSSound(named: NSSound.Name(name))?.play()
+        // Load from the file, not `NSSound(named:)`. The named sounds are
+        // shared singletons — the menu-bar click already plays Tink through
+        // that instance, so `.play()` on Tink/Pop/Glass stacked as a double.
+        let url = URL(fileURLWithPath: "/System/Library/Sounds/\(name).aiff")
+        guard FileManager.default.fileExists(atPath: url.path),
+              let sound = NSSound(contentsOf: url, byReference: true) else { return }
+        current = sound
+        sound.play()
+    }
+
+    /// After the menu dismisses, so this doesn't land on the system menu tick.
+    static func preview(_ cue: StartCue) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) {
+            guard Defaults.startCue == cue else { return }
+            play(cue)
+        }
     }
 }

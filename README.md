@@ -61,6 +61,23 @@ Typical layout (change it in **Trigger**):
 - Cleaned: **🌐** or the other dedicated key
 - Leave **Control** free for Grok Build (`⌃M`, `⌃O`, …)
 
+### Timing (real use, this fork)
+
+Stop → text on screen. Hold-to-talk, smart key, LAN. **175** successful inserts from `Quill.log`.
+
+| | Median | Average | p90 |
+|--|--------:|--------:|----:|
+| **Hold — release → insert** (all smart) | **0.70s** | 0.73s | 1.2s |
+| Already clean (local, no Grok wait) | 0.36s | 0.36s | 0.40s |
+| Cleanup ready when you stop (spec hit) | 0.89s | 0.95s | 1.2s |
+| Cleanup had to finish after stop (spec miss) | 1.07s | 1.16s | 1.5s |
+
+Hold also spends **0.22s** on key-down (Right ⌘ / Right ⌥ / 🌐) so the mic is live before you talk. That delay is *before* speech. It is not added again when you release.
+
+**Without hold** (tap or click-to-stop) uses the same finalize path after you stop, so release→insert and tap→insert should match. This log is almost all hold — the two tap starts were empty clicks, not timed inserts. Simple/raw (no Grok) is the local row: about **0.35s** after stop.
+
+Inside a hold, the split is roughly: STT final **~0.12s** · cleanup **~0.34s** (0 when already clean) · insert **~0.58s**.
+
 ---
 
 ## Use it

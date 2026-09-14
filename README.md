@@ -2,350 +2,173 @@
 
 **Speak anywhere on your Mac. The text lands where you point.**
 
-> **This repository** ([diliprt/quill](https://github.com/diliprt/quill)) is a public fork of
-> [xfreeze2/quill](https://github.com/xfreeze2/quill). Upstream behaviour is preserved; this
-> fork adds hold-to-talk, dual-key Grok cleanup, and a local personal dictionary.
-> Current fork build: **0.8.9**.
+<p align="center">
+  <img src="docs/quill-hero.png" alt="Quill listening from the Mac menu bar" width="920">
+</p>
 
-Tap a key, talk, then click into whatever window you want the words in. They appear there — at
-the end of what's already written, without touching your clipboard.
+> Public fork: **[diliprt/quill](https://github.com/diliprt/quill)** of [xfreeze2/quill](https://github.com/xfreeze2/quill).  
+> Current build: **v0.8.11**. Hold-to-talk, dual-key Grok cleanup, a local dictionary that learns, circle capture, and a start-sound picker.
 
-Quill transcribes with **your existing Grok subscription**, so there's no API key to buy and
-nothing metered.
+Tap or hold a key, talk, click the field you want. The words appear there — usually without touching your clipboard.
+
+Transcription uses **your existing Grok subscription**. No extra API key. Nothing metered by Quill.
 
 ---
 
-## What's new in this fork
+## Recursive learning
 
-Additions on top of upstream (menu-bar right-click → settings):
+The dictionary is a closed loop. Each session can teach the next one, on this Mac only.
+
+<p align="center">
+  <img src="docs/learning-loop.svg" alt="Speak, transcribe, clean or edit, remember — then the next session uses those terms" width="920">
+</p>
+
+1. **Speak** — hold the smart key (or the simple key for raw STT).
+2. **Transcribe** — xAI speech-to-text, biased by terms you already taught it.
+3. **Clean / edit** — light Grok cleanup, or a fix you type after paste.
+4. **Remember** — unique names land in `~/Library/Application Support/com.freeze.quill/vocabulary.json`. Aliases from cleanup and from your edits feed the next hold as STT keyterms.
+
+Nothing in that file is committed to git. Toggle learning, edit-learning, and keyterms from **Personal dictionary** in the menu. Clear it any time.
+
+```mermaid
+flowchart LR
+  A[Speak] --> B[Transcribe]
+  B --> C[Clean or edit]
+  C --> D[Local dictionary]
+  D --> B
+```
+
+---
+
+## What's in this fork (v0.8.11)
 
 | Feature | What it does |
 |--------|----------------|
-| **Hold to talk** | Push-to-talk: press and hold the trigger to listen, release to stop and insert. Prefer **not** using Control (conflicts with Grok Build `⌃…` shortcuts). |
-| **Early arm (P0)** | Mic + HUD start on key-down; session only *commits* after the hold delay — first words aren’t lost. Short release / chords discard. |
-| **Dual triggers** | **Simple key** — raw STT only. **Smart key** — STT → cloud Grok cleanup → insert. |
-| **Clean up with Grok** | Toggle + smart-key picker. See [Cleanup model & latency notes](#cleanup-model--latency-notes) below. **Length-scaled timeout → paste raw** (P1). |
-| **Nearby text for cleanup (P4)** | Opt-in under **Clean up with Grok**. Smart path may use focused field / window title / selection (not passwords) for name spellings only. Default **off** for A/B. |
-| **Personal dictionary** | Local-only unique terms + AI/harness seed; learns from dictation, cleanup pairs, and post-paste edits. File: `~/Library/Application Support/com.freeze.quill/vocabulary.json`. Soft LLM guidance only (hard local alias replace = P2, not shipped). |
-| **Circle screen capture** | Opt-in under **Appearance ▸ Circle to capture screen context**. Circle on-screen content while dictating; **Alt+Tab to your target app, release the dictation key** — Quill pastes speech (+ screenshot if you circled). Needs **Screen Recording** in Setup. Default **off**. |
+| **Hold to talk** | Press and hold to listen, release to insert. Mic arms on key-down so the first word survives. |
+| **Dual keys** | **Simple** — raw STT. **Smart** — STT → Grok cleanup → insert. |
+| **Cleanup styles** | Light, detailed for long holds (10s+), or always detailed. |
+| **Speculative cleanup** | Starts polishing on the live partial so insert waits less. |
+| **Personal dictionary** | Learns unique terms, cleanup pairs, and post-paste edits. Optional STT keyterms. |
+| **Nearby text** | Opt-in: focused field / title / selection (never passwords) to help spell names. |
+| **Circle capture** | Opt-in: circle a region while talking; screenshot stays on the clipboard. |
+| **Start sound** | Menu-bar section: Off, Tink, Pop, Purr, Glass, Ping, Bottle. |
+| **Idle pill** | Optional corner button if you'd rather click than hold. |
 
-### Typical layout (example)
+Typical layout (change it in **Trigger**):
 
 - Gesture: **Hold to talk**
-- Simple dictation: **Hold Right ⌥** or **Right ⌘** → insert as spoken  
-- Cleaned dictation: **Hold 🌐** → light cleanup with Grok → insert  
-- Leave **Control** free for Grok Build (`⌃M`, `⌃O`, etc.)
+- Simple: **Right ⌥** or **Right ⌘**
+- Cleaned: **🌐** or the other dedicated key
+- Leave **Control** free for Grok Build (`⌃M`, `⌃O`, …)
 
-### Hold timing (v0.7.0)
+---
 
-| Trigger | Hold commit delay | Notes |
-|---------|-------------------|--------|
-| **Right ⌥ / Right ⌘** | **0.22s** | Dedicated dictation keys (P3 — snappier). |
-| **F5** | 0.28s | — |
-| **Control ⌃** | 0.45s | Shared with Grok Build / system chords. |
-| **🌐 (fn)** | **0.22s** | Dedicated dictation key; release debounced (0.12s) for flaky Globe up-events. System Globe action forced to *Do Nothing* whenever 🌐 is any trigger. |
+## Use it
 
-Mic + listening HUD arm on **key-down**; the delay only decides commit vs discard. Release before commit, chords, or Escape → no insert.
+1. Hold your trigger. The corner bar listens.
+2. Talk. The transcript streams live.
+3. Finish however you like:
+   - **release the key** (hold-to-talk)
+   - **stop talking** (adjustable pause, default 5s)
+   - say **"that's it"** / **"that's all"** (the phrase is stripped)
+   - **click** the destination field
+   - tap the trigger again
+   - **Escape** discards
 
-### Cleanup model & latency notes
+Highlight text first to replace it. The selection is captured when you press the key.
 
-**Tested preference (2026-08-08 / v0.7.0)** — keep this unless you re-benchmark:
+The idle pill is clickable too. Drag it to an edge and it stays there.
 
-| Setting | Choice | Why |
-|---------|--------|-----|
-| **Cleanup model** | `grok-4-1-fast-non-reasoning` | Felt **faster and cleaner** in real use than `grok-4.20-0309-non-reasoning`. |
-| **Hard timeout** | **Length-scaled 1.5–8s → paste raw** (P1) | Short phrases stay snappy; long rants get more headroom. |
-| **Keep-warm pings** | **Off** (disabled) | Background / periodic warm-ups removed; test without extra API noise. |
-| **Model fallbacks** | **Single model only** | No multi-model retry chain (retries added latency). |
-| **Prompt style** | Light corrector | Grammar / caps / punctuation / obvious typos — not full rephrase. |
-| **Over-rewrite** | Reject → paste **raw** | Stricter “must still look like original” check. |
+### “Open Grok” while talking
 
-**What slowed things down earlier (for future debugging):**
+Say **open Grok** or **open Grok Build** mid-sentence. Quill opens a Grok Build session and keeps recording. The command phrase is removed from the insert (including common mishearings like “grog” / “grock”).
 
-1. Switching primary cleanup to **`grok-4.20-0309-non-reasoning`** (often multi-second latency in logs).
-2. Heavier OpenWhispr-style prompts + large vocabulary injection.
-3. Multi-model fallbacks on reject (extra round-trips).
-4. Hold delay before mic start (lost first words / late HUD) — fixed by early arm in 0.7.0.
+---
 
-**Raw vs cleaned baseline from local logs:** raw insert ~**0.3–0.4s** after stop; good short cleaned path ~**0.7–1.0s**. Cleanup wait scales with transcript length (`budgetSeconds`): floor **1.5s**, roughly **+1s per 350 characters**, ceiling **8s**, then paste raw.
+## Settings
 
-| Transcript size (approx) | Cleanup budget |
-|--------------------------|----------------|
-| Short phrase (~50 chars) | ~1.6s |
-| ~1 min talk (~800 chars) | ~3.8s |
-| ~2.5 min talk (~2000 chars) | ~7.2s |
-| Longer | capped at **8s** |
+Right-click the menu-bar waveform (or the pill):
 
-**Dual-key intent:** **Simple key** (e.g. Right ⌘) = paste as spoken, no wait. **Smart key** (e.g. 🌐) = wait for light Grok cleanup (up to the budget above). Use simple when you want instant; smart when polish is worth the wait.
+- **Start / Stop dictation**
+- **Start sound** — Off plus six system ticks
+- **Clean up with Grok** — enable the smart key, nearby context, speculative cleanup, eager insert, cleanup style
+- **Personal dictionary** — learn while dictating, learn from edits, STT keyterms, add / remove terms
+- **Appearance** — idle pill, circle capture, reset panel
+- **Trigger** — key + hold / single / double
+- **Finish when I stop talking**
+- **Language** — 26 languages or auto
+- **Recent** — last 20 transcripts (optional, local)
+- **Start at login**
 
-### Nearby text for cleanup (P4 / P4b) — A/B test
+---
 
-Menu: **Quill ▸ Clean up with Grok ▸ Use nearby text for cleanup** (requires cleaned dictation on).
-
-| | Off (default) | On |
-|--|---------------|-----|
-| Behaviour | Smart cleanup as in 0.7.1 | Same + AX snapshot of app, window title, field near caret, selection |
-| Passwords | n/a | Secure/password fields **never** sent |
-| Logs | `cleanup context: skipped` / `context=off` | `cleanup context: app=… fieldChars=N` (no field body) + `cleanup ok … Nms context=on` |
-
-**How to compare speed/quality**
-
-1. Leave toggle **off**. Dictate a short smart phrase into a note that already contains a rare name (e.g. type `P2` in the field, then dictate “we can ignore pito”).  
-2. Check `~/Library/Logs/Quill.log` for `cleanup ok … Nms context=off`.  
-3. Turn toggle **on**, repeat the same test.  
-4. Compare `Nms` and whether spellings match the field.
-
-**Current caps:** field snippet **800** chars (near caret), selection **400**, title **120**. Mechanism is **Accessibility only** (no screenshot/OCR). One laptop screen of prose is often ~**2–4k** visible chars — so 800 is local neighborhood, not full page.
-
-### Circle screen capture (v0.8.2+)
-
-Menu: **Quill ▸ Appearance ▸ Circle to capture screen context** (default **off**).
-
-**Permission — Screen Recording, not Accessibility**
-
-Circle capture does **not** appear in Accessibility settings. It needs **Screen Recording**:
-
-**System Settings ▸ Privacy & Security ▸ Screen Recording** → enable **Quill**.
-
-The setup window (**Quill ▸ Setup…**) lists this as an optional row with an **Open Settings** button. Quill also appears in the Screen Recording list after you enable circle capture or try to circle once.
-
-| | Off (default) | On (no circle drawn) | On + circle drawn |
-|--|---------------|----------------------|-------------------|
-| Gesture | Dictate only | Dictate only | **Draw a closed circle** with the mouse around on-screen content |
-| Capture | — | — | PNG cropped to the circled area, with blue highlight ring |
-| Delivery | Normal insert on release | Insert into app frontmost when you **release** the key (Alt+Tab while holding first) | **Speech inserts first**; screenshots stay on clipboard for optional ⌘V attach (combined paste would drop text) |
-| Permission | — | Screen Recording for captures | Screen Recording required |
-
-**Workflow:** hold dictation key → speak (optionally circle) → **Alt+Tab** to where you want it → **release** the key. Quill inserts the transcript into the focused field. If you circled, the screenshot stays on the clipboard — **⌘V once more** only if you want to attach the image (many paste boxes ignore text when an image is in the same paste).
-
-Adapted from [BetterVoice](https://github.com/TarunTomar122/better-voice) (MIT). No OCR or vision model — images are reference screenshots only.
-
-### Future upgrades (parked — revisit if needed)
-
-| ID | Idea | Notes |
-|----|------|--------|
-| **P4-cap** | Raise `contextFieldCap` from **800 → ~2000–2500** | About one screen of chat/prose for better name fixes when terms sit slightly farther from the caret. Re-check cleanup **latency** (`Nms` in log) and privacy. Code: `Sources/Insert.swift` → `contextFieldCap`. **Not doing now** — only if 800 proves too small in real use. |
-| **P2** | Hard local replace for **pinned** dictionary aliases only | Optional; soft LLM dictionary stays. Skipped for now. |
-| ChatGPT / Electron fields | Richer context when AX `fieldChars=0` | Clipboard snippet, browser helpers, or optional screenshot — higher privacy cost; only if AX path stays weak. |
-
-**Code:** `Sources/Cleaner.swift` (`model` + `budgetSeconds(for:)`), `Sources/Hotkey.swift` (arm/commit delays), `Sources/Insert.swift` (P4 context). Do not re-enable keep-warm or switch to 4.20 without a timed A/B on this machine.
-
-If `grok-4-1-fast-non-reasoning` is unavailable on the account, cleanup fails and the app pastes raw — check `~/Library/Logs/Quill.log` for `cleanup budget` / `cleanup ok model=` / `cleanup fail` / `cleanup hard timeout`.
-
-### Build this fork from source
+## Install this fork
 
 ```sh
 git clone https://github.com/diliprt/quill.git && cd quill
 ./signing/install-identity.sh   # once per machine
-./build.sh                      # installs to ~/Applications/Quill.app
+./build.sh                      # ~/Applications/Quill.app
 open -a Quill
 ```
 
-### Tracking upstream
-
-```sh
-git remote add upstream https://github.com/xfreeze2/quill.git   # if missing
-git fetch upstream
-git merge upstream/main    # or: git rebase upstream/main
-./build.sh
-git push origin main
-```
-
-### Ported from upstream (without full rebase)
-
-| Upstream | In this fork |
-|----------|----------------|
-| Mic-based pause (don’t cut mid-sentence) | Yes — adaptive noise floor; default 5s |
-| Insert spacing (don’t glue words) | Yes |
-| Log privacy + log size cap; no selected-text dump | Yes |
-| Clear / disable recent transcript history | Yes |
-| BYOK xAI API key | **No** (Grok Build session only) |
-| Their minimal `Polish.swift` toggle | **No** — we use dual-key `Cleaner` + dictionary instead |
-
-Everything below is the original upstream documentation (still accurate for core dictation, install, privacy, and build).
+Upstream zip / curl install is stock Quill without these extras. Prefer building this repo if you want hold-to-talk, cleanup, and the dictionary.
 
 ---
-
-## Install
-
-Upstream one-liner (stock Quill, without this fork's extras):
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/xfreeze2/quill/main/install.sh | bash
-```
-
-Installs to `~/Applications`, so it never asks for your password. Quill opens and walks you
-through the three things it needs.
-
-Prefer to do it by hand? Grab `Quill.zip` from
-[Releases](https://github.com/xfreeze2/quill/releases), unzip it into `~/Applications`, and run:
-
-```sh
-xattr -dr com.apple.quarantine ~/Applications/Quill.app && open ~/Applications/Quill.app
-```
-
-That last step is needed because Quill isn't notarised by Apple — macOS quarantines anything
-downloaded from the internet. See [Why the quarantine step](#why-the-quarantine-step).
-
-**This fork:** build from source (above) so you get hold-to-talk, cleanup, and the dictionary.
-
-## Use it
-
-1. **Tap `Control`** — a panel appears in the corner and starts listening.
-   *(In this fork you can switch to **Hold to talk**, and optionally a second smart key for cleanup.)*
-2. **Talk.** The transcript streams in live as you speak.
-3. **Finish, any way you like — or just stop talking:**
-   - **say nothing for 3 seconds** — it finishes on its own and pastes. Adjustable, or off
-   - **say "that's it"** or **"that's all"** — Quill stops and pastes; the phrase itself is never included
-   - **click wherever you want the words** — the click both stops it and chooses the destination
-   - **tap `Control` again** — lands them where your cursor already is
-   - **press `Escape`** — throws the whole thing away and pastes nothing
-   - **(fork)** if using hold-to-talk: **release the key** to stop and insert
-
-**Replacing text:** highlight something first, then dictate — what you say replaces the
-selection instead of being appended. The highlight is captured the moment you press the trigger,
-so it survives you clicking elsewhere afterwards.
-
-The finish phrase only stops when it is the *last* thing you say and nothing follows for a moment,
-so ordinary speech like "that's it exactly" or "that's all I need from you" will not cut you off.
-Turn it off in the menu if you'd rather.
-
-The corner pill is clickable too, if you'd rather use the mouse for both ends. **Drag it to any
-edge** and it snaps flush and stays there — the panel then opens inward from that edge, so it
-never sweeps across your screen.
-
-### Say "open Grok" while you're talking
-
-Say **"open Grok"** or **"open Grok Build"** mid-sentence and Quill opens a Grok Build session for
-you *without stopping the recording* — so you can carry straight on and have the rest become your
-prompt:
-
-> "open Grok Build, then write me a haiku about rockets"
-
-…opens Grok and types only `then write me a haiku about rockets`. **The command phrase is always
-removed from the inserted text**, so it can never end up in a prompt. Speech-to-text mishearings
-("grog", "grock", "croc") are matched too.
-
-It opens Ghostty if you have it, otherwise Terminal, using an ordinary new window running a normal
-login shell — the same thing as opening a terminal and typing `grok` yourself, so your theme,
-scrollback and copy/paste all behave exactly as usual.
 
 ## What you need
 
 | | |
 |---|---|
-| **macOS 12 or newer** | Universal — Apple Silicon and Intel |
-| **A Grok subscription** | Quill uses the login the `grok` CLI stores. Without it there's nothing to transcribe with. |
-| **Microphone access** | Asked for on first use |
-| **Accessibility access** | So the trigger key works, and so Quill can type into other apps |
+| **macOS 12+** | Universal — Apple Silicon and Intel |
+| **A Grok subscription** | Uses the login the `grok` CLI already stores |
+| **Microphone** | Asked on first use |
+| **Accessibility** | Trigger key + typing into other apps |
+| **Screen Recording** | Only if you turn on circle capture |
 
-The setup window shows all of these live, with a button next to whatever isn't ready. It reopens
-from the menu any time.
+If the keyboard does nothing and only the pill works, that is Accessibility. The pill turns **amber** — click it.
 
-> **If only the corner pill responds and the keyboard does nothing, that's always Accessibility.**
-> macOS lets an app create a keyboard listener without permission and then simply never sends it
-> anything. Quill turns its pill **amber** when this is the case — click it and it takes you
-> straight to the right settings pane.
-
-## Settings
-
-Right-click the pill (or the menu-bar icon):
-
-- **Trigger** — `Control`, right `⌘`, right `⌥`, `🌐`, or `F5`; single tap or double tap
-- **Click anywhere to insert** — the click-to-choose-destination gesture
-- **Insert at end of field** — append after existing text rather than at the cursor
-- **Stop when I say "that's it" or "that's all"** — finish a dictation by voice alone
-- **Finish when I stop talking** — off, or after 1.5 / 3 / 5 seconds of silence
-- **Language** — 26 languages including Chinese, or auto-detect (which works well — the model
-  identifies the language on its own)
-- **Recent** — your last 20 transcripts, click to copy
-- **Appearance** — "Show idle pill" (hide the resting dot entirely; the trigger key, menu-bar icon
-  and the session bar while dictating all keep working) and "Reset panel position"
-- **Start at login**
-
-### About the trigger key
-
-Bare modifier taps are used deliberately: a modifier pressed on its own means nothing to macOS or
-to any app, so it can't shadow a shortcut in whatever you're typing into.
-
-Chords are filtered out without needing Input Monitoring. Rather than watching the keypress inside
-`⌃C` — which requires that permission — Quill samples the system's input-activity counters when
-the modifier goes down and again when it comes up. Different counts mean you were pressing
-something, so it stays quiet. Clicks and scrolls count too, since `⌃`-click is the right-click
-gesture and `⌃`-scroll is screen zoom, and neither moves a key counter.
-
-`F5` is offered but rarely useful: on most Macs the function row is in media mode, where F5 *is*
-the system Dictation key and never arrives as a keypress at all.
+---
 
 ## How the text gets in
 
-Quill doesn't simulate `⌘V` and doesn't touch your clipboard.
+Quill prefers Accessibility: focused field, caret to the end, write the text. Terminals and many web views fall back to a synthetic ⌘V, then restore your clipboard.
 
-1. It asks Accessibility for the focused element.
-2. It reads what's already in that field and puts the caret after the last character.
-3. It writes the text into the selection, joining with a space if needed.
-
-Terminals, canvases and most web views expose no editable text to Accessibility. Those fall back
-to a synthetic `⌘V` — but the caret is still moved to the end first where possible, and your
-previous clipboard contents are snapshotted and restored afterwards. Either way, what you had
-copied is still there when it's done.
+---
 
 ## Privacy
 
-- Your audio is streamed to xAI's speech-to-text service to be transcribed. Nothing goes anywhere
-  else.
-- Your Grok token is read fresh from `~/.grok/auth.json` at the start of each recording. Quill
-  never copies, stores or transmits it anywhere except to xAI.
-- Your last 20 transcripts are kept locally so you can re-copy them. Clear them with
-  `defaults delete com.freeze.quill history`.
-- Quill does **not** log keystrokes. A debug trail exists for troubleshooting the trigger key and
-  stays off unless you explicitly turn it on.
-- `~/Library/Logs/Quill.log` records what it did — which app it wrote into, and whether the text
-  landed.
+- Audio goes to xAI speech-to-text. Cleanup (smart key only) goes to xAI chat.
+- The Grok token is read from `~/.grok/auth.json` per recording. Quill does not copy it into the repo or into logs.
+- The personal dictionary and optional recent transcripts stay on this Mac.
+- Nearby-context never sends password fields.
+- `~/Library/Logs/Quill.log` records what happened (app name, timings) — not keystrokes.
 
-## Why the quarantine step
+---
 
-Quill is signed, but with a self-signed certificate rather than an Apple Developer one, and it
-isn't notarised. macOS quarantines anything downloaded from the internet and refuses to open apps
-it can't trace to a paid Apple developer account — usually with a misleading "damaged" message.
+## Build notes
 
-The install script strips that quarantine flag for you. Removing it is your decision to trust this
-app, the same decision Homebrew makes on your behalf for every cask you install. If you'd rather
-not, build from source instead — locally built apps are never quarantined.
-
-## Build from source
+No Xcode project. `build.sh` compiles `Sources/*.swift` and signs with a local **Quill Local Signing** identity so Accessibility / Microphone grants survive rebuilds.
 
 ```sh
-git clone https://github.com/xfreeze2/quill && cd quill
-./signing/install-identity.sh   # once per machine
+# Track upstream
+git remote add upstream https://github.com/xfreeze2/quill.git   # if missing
+git fetch upstream
+git merge upstream/main
 ./build.sh
-open -a Quill
 ```
 
-No Xcode project and no dependencies — `swiftc` against Cocoa and AVFoundation, assembled into a
-bundle by `build.sh`.
+Cleanup model in this fork: `grok-4-1-fast-non-reasoning` (xAI maps that to a fast non-reasoning Grok). Length-scaled timeout, then paste **raw**. Single model, no fallback chain.
 
-`install-identity.sh` creates a local self-signed certificate so the app's code identity stays
-stable between builds. That matters more than it sounds: with ad-hoc signing macOS treats every
-rebuild as a brand-new app, silently drops your Accessibility and Microphone grants, and leaves
-the old entries sitting in System Settings still looking enabled. The certificate lives in its own
-keychain, so builds never prompt for your password.
-
-Verify the transcription path without a microphone:
-
-```sh
-# 16 kHz mono PCM16: ffmpeg -i in.wav -ar 16000 -ac 1 -f s16le out.pcm
-QUILL_SELFTEST=out.pcm ~/Applications/Quill.app/Contents/MacOS/Quill
-```
+---
 
 ## Known limits
 
-- Settings live per-machine and don't sync.
-- A recording stops itself after 5 minutes, or after 10 seconds if it hears nothing at all.
-- If your Grok token has expired and `grok` isn't running to refresh it, Quill says so rather than
-  failing quietly.
-- Not notarised — see above.
+- Settings are per-machine.
+- A recording stops after 5 minutes, or after 10 seconds of silence with no transcript.
+- Not notarised — locally built apps skip quarantine; downloaded zips need `xattr -dr com.apple.quarantine`.
+
+---
 
 ## Licence
 
-MIT. Use it for anything.
+MIT. Use it for anything. Upstream: [xfreeze2/quill](https://github.com/xfreeze2/quill).

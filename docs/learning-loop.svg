@@ -1,0 +1,55 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="420" viewBox="0 0 1200 420" role="img" aria-labelledby="title desc">
+  <title id="title">Quill recursive learning loop</title>
+  <desc id="desc">Speak, transcribe, clean or edit, then the dictionary feeds the next session.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#16181d"/>
+      <stop offset="100%" stop-color="#0e1014"/>
+    </linearGradient>
+    <linearGradient id="card" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#2a2f38"/>
+      <stop offset="100%" stop-color="#1c2027"/>
+    </linearGradient>
+  </defs>
+  <rect width="1200" height="420" rx="28" fill="url(#bg)"/>
+  <text x="60" y="58" fill="#f4f1ea" font-family="-apple-system, BlinkMacSystemFont, Helvetica, sans-serif" font-size="26" font-weight="600">Recursive learning</text>
+  <text x="60" y="88" fill="#9aa3b2" font-family="-apple-system, BlinkMacSystemFont, Helvetica, sans-serif" font-size="16">Each dictation teaches the next one  locally, on your Mac.</text>
+
+  <!-- cards -->
+  <g font-family="-apple-system, BlinkMacSystemFont, Helvetica, sans-serif">
+    <rect x="56" y="130" width="240" height="200" rx="22" fill="url(#card)" stroke="#3a414d"/>
+    <circle cx="176" cy="188" r="28" fill="#1f6feb"/>
+    <text x="176" y="196" text-anchor="middle" fill="white" font-size="20">1</text>
+    <text x="176" y="248" text-anchor="middle" fill="#f4f1ea" font-size="20" font-weight="600">Speak</text>
+    <text x="176" y="278" text-anchor="middle" fill="#9aa3b2" font-size="14">Hold the key and talk</text>
+
+    <rect x="338" y="130" width="240" height="200" rx="22" fill="url(#card)" stroke="#3a414d"/>
+    <circle cx="458" cy="188" r="28" fill="#3fb950"/>
+    <text x="458" y="196" text-anchor="middle" fill="white" font-size="20">2</text>
+    <text x="458" y="248" text-anchor="middle" fill="#f4f1ea" font-size="20" font-weight="600">Transcribe</text>
+    <text x="458" y="278" text-anchor="middle" fill="#9aa3b2" font-size="14">STT uses your terms</text>
+
+    <rect x="620" y="130" width="240" height="200" rx="22" fill="url(#card)" stroke="#3a414d"/>
+    <circle cx="740" cy="188" r="28" fill="#d29922"/>
+    <text x="740" y="196" text-anchor="middle" fill="#16181d" font-size="20">3</text>
+    <text x="740" y="248" text-anchor="middle" fill="#f4f1ea" font-size="20" font-weight="600">Clean / edit</text>
+    <text x="740" y="278" text-anchor="middle" fill="#9aa3b2" font-size="14">Grok or your own fix</text>
+
+    <rect x="902" y="130" width="240" height="200" rx="22" fill="url(#card)" stroke="#3a414d"/>
+    <circle cx="1022" cy="188" r="28" fill="#a371f7"/>
+    <text x="1022" y="196" text-anchor="middle" fill="white" font-size="20">4</text>
+    <text x="1022" y="248" text-anchor="middle" fill="#f4f1ea" font-size="20" font-weight="600">Remember</text>
+    <text x="1022" y="278" text-anchor="middle" fill="#9aa3b2" font-size="14">Dictionary updates</text>
+  </g>
+
+  <!-- arrows between cards -->
+  <g fill="#8b949e">
+    <polygon points="308,230 326,222 326,238"/>
+    <rect x="296" y="227" width="14" height="6" rx="2"/>
+    <polygon points="590,230 608,222 608,238"/>
+    <rect x="578" y="227" width="14" height="6" rx="2"/>
+    <polygon points="872,230 890,222 890,238"/>
+    <rect x="860" y="227" width="14" height="6" rx="2"/>
+  </g>
+  <text x="600" y="390" text-anchor="middle" fill="#6e7681" font-family="-apple-system, BlinkMacSystemFont, Helvetica, sans-serif" font-size="14">Then the loop runs again  aliases and keyterms steer the next hold.</text>
+</svg>
